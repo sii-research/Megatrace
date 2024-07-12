@@ -17,6 +17,7 @@
 #include <queue>
 
 const int Hang_Limit = 2;
+const double Hang_Time = 2000;
 
 // 事件信息结构
 struct EventInfo {
@@ -31,6 +32,8 @@ struct EventInfo {
 
 std::vector<EventInfo*> event_list;
 std::mutex event_list_mutex;
+
+std::unordered_set<uintptr_t> Hang_Event;
 
 //生产者消费者队列
 std::queue<std::pair<cudaEvent_t, long long> > destroy_event_queue;
@@ -71,8 +74,6 @@ static ncclReduceScatter_t real_ncclReduceScatter = NULL;
 static ncclAllGather_t real_ncclAllGather = NULL;
 static ncclSendRecv_t real_ncclSendRecv = NULL;
 
-int cal[2];
-double dif;
 void init_logger() {
     spdlog::init_thread_pool(8191, 4); // 初始化 spdlog 线程池
     spdlog::set_pattern("%v");
@@ -88,20 +89,20 @@ void ensure_logger_initialized() {
 void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
 //    std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<<" stream "<< stream<<" time "<< t<< " verb " << func_name << std::endl;
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
-   // std::cout <<"stream "<<stream_event <<std::endl;
-    logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
+    // std::cout <<"RANK: " << getenv("OMPI_COMM_WORLD_RANK") << " stream " <<stream_event <<" "<<" Fuction "<<func_name<<std::endl;
+    logger->info("Rank: {} stream {} Function {}" ,getenv("OMPI_COMM_WORLD_RANK"), stream_event, func_name);
+    // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 
 void print_event_info(const char* func_name, cudaEvent_t event) {
-     std::string str_event = std::to_string(reinterpret_cast<std::uintptr_t>(event));
-//     std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<< " Function " << func_name << " called with event " << event << std::endl;
+    // std::string str_event = std::to_string(reinterpret_cast<std::uintptr_t>(event));
+    // std::cout<<getenv("OMPI_COMM_WORLD_RANK")<<" "<<func_name<<" "<<uintptr_t(event)<<std::endl;
+    logger->info("Rank: {} Function {} called with event {}",getenv("OMPI_COMM_WORLD_RANK"), func_name, uintptr_t(event));
+    // std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<< " Function " << func_name << " called with event " << event << std::endl;
 }
 
-void print_hang_info(EventInfo* ev){
-       auto now = std::chrono::system_clock::now();
-       auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
-       long long now_us_count = now_us.count();
-       std::cout<<"Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< " called with event " << (ev->event) << " exist time: "<< now_us_count - (ev->start_time)<<std::endl;
+void print_hang_info(EventInfo* ev,long long now_us_count){
+    std::cout<<"Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< " called with event " << (ev->event) << " exist time: "<< 1.0*(now_us_count - (ev->start_time))/1000<<"ms"<<std::endl;
 }
 
 void watchdog_thread() {
@@ -148,6 +149,7 @@ void watchdog_thread() {
             std::lock_guard<std::mutex> destroy_lock(destroy_event_list_mutex);
         //	std::vector<std::unordered_map<uintptr_t, EventInfo*>::iterator> iterVector;
             std::lock_guard<std::mutex> event_lock(event_list_mutex);
+            Hang_Event.clear();
             for (auto it = event_list.begin(); it != event_list.end();){
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
@@ -167,6 +169,7 @@ void watchdog_thread() {
         {
             std::lock_guard<std::mutex> event_lock(event_list_mutex);
             // std::cout<<"start delete"<<std::endl;
+
             for (auto it = event_list.begin(); it != event_list.end(); ) {
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
@@ -175,6 +178,7 @@ void watchdog_thread() {
                     continue;
                 }
                 if((*it)->destroy == true) {
+                    logger->info("Rank: {} event {} start_time {} end_time {} time {} ms",getenv("OMPI_COMM_WORLD_RANK"), (uintptr_t)((*it)->event), (*it)->start_time, (*it)->end_time, 1.0*(((*it)->end_time)-((*it)->start_time))/1000) ;
                     // std::cout<<"Rank "<<getenv("OMPI_COMM_WORLD_RANK")<<" event " << (*it)->event<<" start_time:"<<(*it)->start_time<<" end_time:"<<(*it)->end_time<<" time "<<1.0*(((*it)->end_time)-((*it)->start_time))/1000<<" ms"<<std::endl;
                     std::lock_guard<std::mutex> SET_lock(SET);
                     if(testS.find((uintptr_t)((*it)->event)) != testS.end())
@@ -190,7 +194,6 @@ void watchdog_thread() {
                         continue;
                     }
                     if(testS.find((uintptr_t)((*it)->event)) != testS.end()) {it++; continue;}
-                    {it++; continue;}
                     auto Result = cudaEventQuery((*it)->event);                    
                     
                     
@@ -207,10 +210,15 @@ void watchdog_thread() {
                         it = event_list.erase(it);
                         continue;
                     }
-                    if(++((*it)->Life_time) >= Hang_Limit){
-                        //	print_hang_info((*it));
+                    if(++((*it)->Life_time) >= Hang_Limit && Hang_Event.find((uintptr_t)((*it)->event)) == Hang_Event.end()){
+                        Hang_Event.insert((uintptr_t)((*it)->event));
+                        auto now = std::chrono::system_clock::now();
+                        auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+                        long long now_us_count = now_us.count();
+                        if(now_us_count-((*it)->start_time) >= Hang_Time * 1000)
+                            print_hang_info((*it),now_us_count);
                     }
-                    it++;
+                    it++;  
                 }
             }
         }
@@ -223,16 +231,18 @@ void watchdog_thread() {
     //         std::cout<<"all_dstroy_cnt:"<<destroy_count<<std::endl;
         }
 	    if (event_list.empty()) {
+            
        		std::lock_guard<std::mutex> guard(running_mutex);
        		watchdog_state.exchange(false);
 		    break;
     	}
-	    // std::cout<<"watchdog state"<<" "<<watchdog_state<<std::endl;
+
 //	    std::cout<<"release lock"<<std::endl;
     }
 	// std::cout<<"exit thread"<<std::endl;
 }
 extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags) {
+    ensure_logger_initialized();
     if (!real_cudaStreamWaitEvent) {
         real_cudaStreamWaitEvent = (cudaStreamWaitEvent_t)dlsym(RTLD_NEXT, "cudaStreamWaitEvent");
     }
@@ -245,6 +255,7 @@ extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t even
     else{
 //	std::cout<<"Insert Event"<<std::endl;
     	EventInfo* ev_info = new EventInfo(event,stream,now_us_count);
+        ev_info->Life_time = 0;
 	    {	
 		    std::lock_guard<std::mutex> event_queue_lock(event_queue_mutex);
     		event_queue.push(ev_info);
@@ -261,6 +272,7 @@ extern "C" cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     if (!real_cudaEventRecord) {
         real_cudaEventRecord = (cudaEventRecord_t)dlsym(RTLD_NEXT, "cudaEventRecord");
     }
+    ensure_logger_initialized();
     return real_cudaEventRecord(event,stream);
 }
 // 拦截 cudaEventQuery
@@ -268,6 +280,7 @@ extern "C" cudaError_t cudaEventQuery(cudaEvent_t event) {
     if (!real_cudaEventQuery) {
         real_cudaEventQuery = (cudaEventQuery_t)dlsym(RTLD_NEXT, "cudaEventQuery");
     }
+    ensure_logger_initialized();
 //    print_event_info("cudaEventQuery", event);
     return real_cudaEventQuery(event);
 }
@@ -275,6 +288,7 @@ extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {
     if (!real_cudaEventDestroy) {
         real_cudaEventDestroy = (cudaEventDestroy_t)dlsym(RTLD_NEXT, "cudaEventDestroy");
     }
+    ensure_logger_initialized();
     auto now = std::chrono::system_clock::now();
 	auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
   	long long now_us_count = now_us.count();

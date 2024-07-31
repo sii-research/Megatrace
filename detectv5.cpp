@@ -326,7 +326,7 @@ extern "C" cudaError_t cudaEventQuery(cudaEvent_t event) {
         real_cudaEventQuery = (cudaEventQuery_t)dlsym(RTLD_NEXT, "cudaEventQuery");
     }
     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
-   print_event_info("cudaEventQuery", event);
+    // print_event_info("cudaEventQuery", event);
     return real_cudaEventQuery(event);
 }
 extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {

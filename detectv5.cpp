@@ -24,8 +24,8 @@
 
 namespace fs = std::filesystem;
 
-const int Hang_Limit = 2;
-const double Hang_Time = 2000;
+const int Hang_Limit = 30;
+const double Hang_Time = 30000;
 
 // 事件信息结构
 struct EventInfo {
@@ -140,8 +140,8 @@ void print_event_info(const char* func_name, cudaEvent_t event) {
 }
 
 void print_hang_info(EventInfo* ev,long long now_us_count){
-     logger->info("Warning: [{}] [Rank: {}] event {} has been ongoing for [{}] ms", now_us_count, getenv("OMPI_COMM_WORLD_RANK"), uintptr_t(ev->event), 1.0*(now_us_count - (ev->start_time))/1000);
-    // std::cout<<"Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< " called with event " << (ev->event) << " exist time: "<< 1.0*(now_us_count - (ev->start_time))/1000<<"ms"<<std::endl;
+    logger->info("Warning: [{}] [Rank: {}] event {} has been ongoing for [{}] ms", now_us_count, getenv("OMPI_COMM_WORLD_RANK"), uintptr_t(ev->event), 1.0*(now_us_count - (ev->start_time))/1000);
+    std::cout<<"Warning:["<<now_us_count<<"] [Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< "] event "<<uintptr_t(ev->event)<<" has been ongoing for ["<<1.0*(now_us_count - (ev->start_time))/1000<<"] ms"<<std::endl;
 }
 
 void watchdog_thread() {

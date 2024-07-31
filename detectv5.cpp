@@ -8,13 +8,21 @@
 #include <mutex>
 #include <memory>
 #include <atomic>
+#include "spdlog/spdlog.h"
+#include "spdlog/async.h"
+#include "spdlog/sinks/basic_file_sink.h"
 #include <unordered_map>
 #include <cstdint>
 #include <unordered_set>
 #include <queue>
-#include "spdlog/include/spdlog/spdlog.h"
-#include "spdlog/include/spdlog/async.h"
-#include "spdlog/include/spdlog/sinks/basic_file_sink.h"
+#include <fstream>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
+#include <string>
+
+
+namespace fs = std::filesystem;
 
 const int Hang_Limit = 2;
 const double Hang_Time = 2000;
@@ -48,6 +56,7 @@ std::mutex running_mutex;
 std::atomic<bool> watchdog_state(false);
 std::shared_ptr<spdlog::logger> logger;
 std::once_flag logger_init_flag;
+std::once_flag file_init_flag;
 
 
 std::mutex cout_mutex;
@@ -74,39 +83,69 @@ static ncclReduceScatter_t real_ncclReduceScatter = NULL;
 static ncclAllGather_t real_ncclAllGather = NULL;
 static ncclSendRecv_t real_ncclSendRecv = NULL;
 
-void init_logger() {
+std::string time_str;
+
+std::unordered_map<int, std::shared_ptr<spdlog::logger>> rank_loggers;
+
+void file_init(){
+    auto now = std::chrono::system_clock::now();
+    std::time_t now_time_t = std::chrono::system_clock::to_time_t(now);
+
+    std::tm* local_tm = std::localtime(&now_time_t);
+    std::ostringstream oss;
+    oss << std::put_time(local_tm, "%Y%m%d_%H%M%S");
+    time_str = oss.str();
+    std::string folder_name = "logs/" + time_str;
+
+    fs::create_directories(folder_name);
+
+}
+
+void init_logger(int rank) {
+    std::call_once(file_init_flag, file_init);
     spdlog::init_thread_pool(8191, 4); // 初始化 spdlog 线程池
     spdlog::set_pattern("%v");
-    logger = spdlog::basic_logger_mt<spdlog::async_factory>("cuda_logger", "logs/cuda.log");
+
+    std::string log_file = "logs/"+time_str+"/cuda_rank_" + std::to_string(rank) + ".log";
+    logger = spdlog::basic_logger_mt<spdlog::async_factory>("cuda_logger_" + std::to_string(rank), log_file);
+    rank_loggers[rank] = logger;
     spdlog::set_default_logger(logger);
     spdlog::set_level(spdlog::level::info); // 设置全局日志级别
 }
 
-void ensure_logger_initialized() {
-    std::call_once(logger_init_flag, init_logger);
+void ensure_logger_initialized(char* rank) {
+    int rk = std::atoi(rank);
+    std::call_once(logger_init_flag, [&](){init_logger(rk); });
 }
 
 void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
 //    std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<<" stream "<< stream<<" time "<< t<< " verb " << func_name << std::endl;
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
     // std::cout <<"RANK: " << getenv("OMPI_COMM_WORLD_RANK") << " stream " <<stream_event <<" "<<" Fuction "<<func_name<<std::endl;
-    logger->info("Rank: {} stream {} Function {}" ,getenv("OMPI_COMM_WORLD_RANK"), stream_event, func_name);
+    logger->info("[{}] [Rank: {}] NCCL Function called in stream {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), stream_event, func_name);
     // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 
 void print_event_info(const char* func_name, cudaEvent_t event) {
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
     // std::string str_event = std::to_string(reinterpret_cast<std::uintptr_t>(event));
     // std::cout<<getenv("OMPI_COMM_WORLD_RANK")<<" "<<func_name<<" "<<uintptr_t(event)<<std::endl;
-    logger->info("Rank: {} Function {} called with event {}",getenv("OMPI_COMM_WORLD_RANK"), func_name, uintptr_t(event));
+    logger->info("[{}] [Rank: {}] Function {} called with event {}",now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, uintptr_t(event));
     // std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<< " Function " << func_name << " called with event " << event << std::endl;
 }
 
 void print_hang_info(EventInfo* ev,long long now_us_count){
-    std::cout<<"Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< " called with event " << (ev->event) << " exist time: "<< 1.0*(now_us_count - (ev->start_time))/1000<<"ms"<<std::endl;
+     logger->info("Warning: [{}] [Rank: {}] event {} has been ongoing for [{}] ms", now_us_count, getenv("OMPI_COMM_WORLD_RANK"), uintptr_t(ev->event), 1.0*(now_us_count - (ev->start_time))/1000);
+    // std::cout<<"Rank: "<< getenv("OMPI_COMM_WORLD_RANK")<< " called with event " << (ev->event) << " exist time: "<< 1.0*(now_us_count - (ev->start_time))/1000<<"ms"<<std::endl;
 }
 
 void watchdog_thread() {
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
 	int count;
     while (watchdog_state) {
 	    count = 0;
@@ -178,7 +217,7 @@ void watchdog_thread() {
                     continue;
                 }
                 if((*it)->destroy == true) {
-                    logger->info("Rank: {} event {} start_time {} end_time {} time {} ms",getenv("OMPI_COMM_WORLD_RANK"), (uintptr_t)((*it)->event), (*it)->start_time, (*it)->end_time, 1.0*(((*it)->end_time)-((*it)->start_time))/1000) ;
+                    logger->info("[{}] [Rank: {}] event {} has completed, start_time: {} end_time: {} exist_time {} ms",(*it)->end_time,getenv("OMPI_COMM_WORLD_RANK"), (uintptr_t)((*it)->event), (*it)->start_time, (*it)->end_time, 1.0*(((*it)->end_time)-((*it)->start_time))/1000) ;
                     // std::cout<<"Rank "<<getenv("OMPI_COMM_WORLD_RANK")<<" event " << (*it)->event<<" start_time:"<<(*it)->start_time<<" end_time:"<<(*it)->end_time<<" time "<<1.0*(((*it)->end_time)-((*it)->start_time))/1000<<" ms"<<std::endl;
                     std::lock_guard<std::mutex> SET_lock(SET);
                     if(testS.find((uintptr_t)((*it)->event)) != testS.end())
@@ -193,7 +232,10 @@ void watchdog_thread() {
                          ++it;
                         continue;
                     }
-                    if(testS.find((uintptr_t)((*it)->event)) != testS.end()) {it++; continue;}
+                    {
+                        std::lock_guard<std::mutex> SET_lock(SET);
+                        if(testS.find((uintptr_t)((*it)->event)) != testS.end()) {it++; continue;}
+                    }
                     auto Result = cudaEventQuery((*it)->event);                    
                     
                     
@@ -242,7 +284,7 @@ void watchdog_thread() {
 	// std::cout<<"exit thread"<<std::endl;
 }
 extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags) {
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     if (!real_cudaStreamWaitEvent) {
         real_cudaStreamWaitEvent = (cudaStreamWaitEvent_t)dlsym(RTLD_NEXT, "cudaStreamWaitEvent");
     }
@@ -272,7 +314,10 @@ extern "C" cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     if (!real_cudaEventRecord) {
         real_cudaEventRecord = (cudaEventRecord_t)dlsym(RTLD_NEXT, "cudaEventRecord");
     }
-    ensure_logger_initialized();
+    
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    
+    print_event_info("cudaEventRecord", event);
     return real_cudaEventRecord(event,stream);
 }
 // 拦截 cudaEventQuery
@@ -280,15 +325,15 @@ extern "C" cudaError_t cudaEventQuery(cudaEvent_t event) {
     if (!real_cudaEventQuery) {
         real_cudaEventQuery = (cudaEventQuery_t)dlsym(RTLD_NEXT, "cudaEventQuery");
     }
-    ensure_logger_initialized();
-//    print_event_info("cudaEventQuery", event);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+   print_event_info("cudaEventQuery", event);
     return real_cudaEventQuery(event);
 }
 extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {
     if (!real_cudaEventDestroy) {
         real_cudaEventDestroy = (cudaEventDestroy_t)dlsym(RTLD_NEXT, "cudaEventDestroy");
     }
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     auto now = std::chrono::system_clock::now();
 	auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
   	long long now_us_count = now_us.count();
@@ -315,7 +360,7 @@ extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {
 
 extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
     void* handle = dlopen("libnccl.so", RTLD_LAZY);
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     if (!handle) {
         fprintf(stderr, "%s\n", dlerror());
     }
@@ -334,7 +379,7 @@ extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size
 
 extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
     void* handle = dlopen("libnccl.so", RTLD_LAZY);
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     if (!handle) {
         fprintf(stderr, "%s\n", dlerror());
     }
@@ -353,7 +398,7 @@ extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, 
 
 extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
     void* handle = dlopen("libnccl.so", RTLD_LAZY);
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     if (!handle) {
         fprintf(stderr, "%s\n", dlerror());
     }
@@ -372,7 +417,7 @@ extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size
 
 extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncclDataType_t sendtype, int peer_send, void* recvbuff, size_t recvcount, ncclDataType_t recvtype, int peer_recv, ncclComm_t comm, cudaStream_t stream) {
     void* handle = dlopen("libnccl.so", RTLD_LAZY);
-    ensure_logger_initialized();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
     if (!handle) {
         fprintf(stderr, "%s\n", dlerror());
     }

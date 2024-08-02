@@ -125,7 +125,7 @@ void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
 //    std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<<" stream "<< stream<<" time "<< t<< " verb " << func_name << std::endl;
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
     // std::cout <<"RANK: " << getenv("OMPI_COMM_WORLD_RANK") << " stream " <<stream_event <<" "<<" Fuction "<<func_name<<std::endl;
-    logger->info("[{}] [Rank: {}] NCCL Function called in stream {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), stream_event, func_name);
+    logger->info("[{}] [Rank: {}] NCCL Function {} called in stream {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, stream_event);
     // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 

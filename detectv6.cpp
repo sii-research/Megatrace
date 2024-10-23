@@ -1,5 +1,5 @@
 #include <cuda_runtime.h>
-#include <nccl.h> 
+#include <nccl.h>
 #include <dlfcn.h>
 #include <iostream>
 #include <vector>
@@ -64,24 +64,44 @@ std::mutex cout_mutex;
 std::unordered_set<uintptr_t> testS;
 std::mutex SET;
 
+
+
+
+
+
+
 typedef cudaError_t (*cudaStreamWaitEvent_t)(cudaStream_t, cudaEvent_t, unsigned int);
 typedef cudaError_t (*cudaEventRecord_t)(cudaEvent_t, cudaStream_t);
 typedef cudaError_t (*cudaEventQuery_t)(cudaEvent_t);
 typedef cudaError_t (*cudaEventDestroy_t)(cudaEvent_t);
+
+
+
+typedef ncclResult_t  (*ncclReduce_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+typedef ncclResult_t  (*ncclBroadcast_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 typedef ncclResult_t (*ncclAllReduce_t)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclReduceScatter_t)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclAllGather_t)(const void*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclSendRecv_t)(const void*, size_t, ncclDataType_t, int, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t);
+
+typedef ncclResult_t (*ncclSend_t)(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);                    
+typedef ncclResult_t (*ncclRecv_t)(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+
 
 
 static cudaStreamWaitEvent_t real_cudaStreamWaitEvent = nullptr;
 static cudaEventRecord_t real_cudaEventRecord = nullptr;
 static cudaEventQuery_t real_cudaEventQuery = nullptr;
 static cudaEventDestroy_t  real_cudaEventDestroy = nullptr;
+
+static ncclReduce_t real_ncclReduce = NULL;
+static ncclBroadcast_t real_ncclBroadcast = NULL;
 static ncclAllReduce_t real_ncclAllReduce = NULL;
 static ncclReduceScatter_t real_ncclReduceScatter = NULL;
 static ncclAllGather_t real_ncclAllGather = NULL;
 static ncclSendRecv_t real_ncclSendRecv = NULL;
+static ncclSend_t real_ncclSend = NULL;
+static ncclRecv_t real_ncclRecv = NULL;
 
 std::string time_str;
 
@@ -175,7 +195,7 @@ void watchdog_thread() {
                 auto event = event_queue.front();
                 event_queue.pop();
                 event_queue_lock.unlock();
-                
+
                 {
                     std::lock_guard<std::mutex> event_lock(event_list_mutex);
                     event_list.push_back(event);
@@ -193,12 +213,12 @@ void watchdog_thread() {
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
                     delete (*it);
-     		        it = event_list.erase(it);	
+     		        it = event_list.erase(it);
        			    continue;
     		    }
                 if(destroy_event_list.find((uintptr_t)((*it)->event)) != destroy_event_list.end() && (*it)->destroy == false){
                     (*it)->destroy = true;
-                    (*it)->end_time = destroy_event_list[(uintptr_t)((*it)->event)]; 
+                    (*it)->end_time = destroy_event_list[(uintptr_t)((*it)->event)];
                 }
                 it++;
             }
@@ -213,7 +233,7 @@ void watchdog_thread() {
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
                     delete (*it);
-                    it = event_list.erase(it);	
+                    it = event_list.erase(it);
                     continue;
                 }
                 if((*it)->destroy == true) {
@@ -236,16 +256,16 @@ void watchdog_thread() {
                         std::lock_guard<std::mutex> SET_lock(SET);
                         if(testS.find((uintptr_t)((*it)->event)) != testS.end()) {it++; continue;}
                     }
-                    auto Result = cudaEventQuery((*it)->event);                    
-                    
-                    
+                    auto Result = cudaEventQuery((*it)->event);
+
+
                     // std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     if (Result != cudaSuccess && Result != cudaErrorNotReady) {
                         delete (*it);
                         it = event_list.erase(it);
                         continue;
                     }
-                    
+
                     if(Result == cudaSuccess) {
                         std::lock_guard<std::mutex> SET_lock(SET);
                         delete (*it);
@@ -260,7 +280,7 @@ void watchdog_thread() {
                         if(now_us_count-((*it)->start_time) >= Hang_Time * 1000)
                             print_hang_info((*it),now_us_count);
                     }
-                    it++;  
+                    it++;
                 }
             }
         }
@@ -273,7 +293,7 @@ void watchdog_thread() {
     //         std::cout<<"all_dstroy_cnt:"<<destroy_count<<std::endl;
         }
 	    if (event_list.empty()) {
-            
+
        		std::lock_guard<std::mutex> guard(running_mutex);
        		watchdog_state.exchange(false);
 		    break;
@@ -298,7 +318,7 @@ extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t even
 //	std::cout<<"Insert Event"<<std::endl;
     	EventInfo* ev_info = new EventInfo(event,stream,now_us_count);
         ev_info->Life_time = 0;
-	    {	
+	    {
 		    std::lock_guard<std::mutex> event_queue_lock(event_queue_mutex);
     		event_queue.push(ev_info);
     	}
@@ -314,9 +334,9 @@ extern "C" cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     if (!real_cudaEventRecord) {
         real_cudaEventRecord = (cudaEventRecord_t)dlsym(RTLD_NEXT, "cudaEventRecord");
     }
-    
+
     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
-    
+
     print_event_info("cudaEventRecord", event);
     return real_cudaEventRecord(event,stream);
 }
@@ -433,3 +453,84 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
     print_nccl_info("ncclSendRecv",stream,now_us_count);
     return real_ncclSendRecv(sendbuff, sendcount, sendtype, peer_send, recvbuff, recvcount, recvtype, peer_recv, comm, stream);
 }
+
+
+extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclSend_t real_ncclSend = (ncclSend_t)dlsym(handle, "ncclSend");
+    if (!real_ncclSend) {
+        fprintf(stderr, "Cannot find symbol ncclSend: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclSend",stream,now_us_count);
+    return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
+}
+extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclRecv_t real_ncclRecv = (ncclRecv_t)dlsym(handle, "ncclRecv");
+    if (!real_ncclRecv) {
+        fprintf(stderr, "Cannot find symbol ncclSendRecv: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclRecv",stream,now_us_count);
+    return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
+}
+
+
+extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclReduce_t real_ncclReduce = (ncclReduce_t)dlsym(handle, "ncclReduce");
+    if (!real_ncclReduce) {
+        fprintf(stderr, "Cannot find symbol ncclReduce: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclReduce",stream,now_us_count);
+    return real_ncclReduce(sendbuff, recvbuff, count,  datatype, op, root,  comm, stream);
+}
+
+extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclBroadcast_t real_ncclBroadcast = (ncclBroadcast_t)dlsym(handle, "ncclBroadcast");
+    if (!real_ncclBroadcast) {
+        fprintf(stderr, "Cannot find symbol ncclBroadcast: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclBroadcast",stream,now_us_count);
+    return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
+}
+
+
+
+

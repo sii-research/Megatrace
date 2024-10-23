@@ -1,5 +1,6 @@
 #include <cuda_runtime.h>
-#include <nccl.h> 
+#include <nccl.h>
+#include <cublas_v2.h>
 #include <dlfcn.h>
 #include <iostream>
 #include <vector>
@@ -20,10 +21,12 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <cuda_runtime_api.h>
+#include <cuda.h>
+
 
 
 namespace fs = std::filesystem;
-
 const int Hang_Limit = 30;
 const double Hang_Time = 30000;
 
@@ -64,24 +67,60 @@ std::mutex cout_mutex;
 std::unordered_set<uintptr_t> testS;
 std::mutex SET;
 
+
 typedef cudaError_t (*cudaStreamWaitEvent_t)(cudaStream_t, cudaEvent_t, unsigned int);
 typedef cudaError_t (*cudaEventRecord_t)(cudaEvent_t, cudaStream_t);
 typedef cudaError_t (*cudaEventQuery_t)(cudaEvent_t);
 typedef cudaError_t (*cudaEventDestroy_t)(cudaEvent_t);
+
+typedef ncclResult_t  (*ncclReduce_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
+typedef ncclResult_t  (*ncclBroadcast_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 typedef ncclResult_t (*ncclAllReduce_t)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclReduceScatter_t)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclAllGather_t)(const void*, void*, size_t, ncclDataType_t, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclSendRecv_t)(const void*, size_t, ncclDataType_t, int, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t);
 
+typedef ncclResult_t (*ncclSend_t)(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+typedef ncclResult_t (*ncclRecv_t)(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+
+
+// cudaLaunchKernel
+typedef cudaError_t (*cudaLaunchKernel_t)(const void*, dim3, dim3, void**, size_t, cudaStream_t);
+//typedef cudaError_t (*cudaLaunchKernelExC_t)(const void*, dim3, dim3, void**, size_t, cudaStream_t, int, int);
+
+// cuBLAS
+//typedef cublasStatus_t (*cublasGemmEx_t)(cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int, const void *, const void *, cudaDataType, int, const void *, cudaDataType, int, const void *, void *, cudaDataType, int, cudaDataType, cublasGemmAlgo_t);
+//typedef cublasStatus_t (*cublasGemmStridedBatchedEx_t)(cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int, const void *, const void *, cudaDataType, int, long long, const void *, cudaDataType, int, long long, const void *, void *, cudaDataType, int, long long, cudaDataType, cublasGemmAlgo_t);
+//typedef cublasStatus_t (*cublasLtMatmul_t)(void*, void*, const void*, const void*, const void*, const void*, const void*, const void*, const void*, void*, void*, void*);
+//typedef cublasStatus_t (*cublasSgemm_t)(cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int, const float *, const float *, int, const float *, int, const float *, float *, int);
+//typedef cublasStatus_t (*cublasSgemmStridedBatched_t)(cublasHandle_t, cublasOperation_t, cublasOperation_t, int, int, int, const float *, const float *, int, long long, const float *, int, long long, const float *, float *, int, long long, int);
+
+typedef cudaError_t (*real_cudaFuncGetAttributes_t)(struct cudaFuncAttributes *, const void *);
+typedef cudaError_t (*real_cudaMemcpyAsync_t)(void *, const void *, size_t, cudaMemcpyKind, cudaStream_t);
+static real_cudaFuncGetAttributes_t real_cudaFuncGetAttributes = NULL;
+static real_cudaMemcpyAsync_t real_cudaMemcpyAsync = NULL;
 
 static cudaStreamWaitEvent_t real_cudaStreamWaitEvent = nullptr;
 static cudaEventRecord_t real_cudaEventRecord = nullptr;
 static cudaEventQuery_t real_cudaEventQuery = nullptr;
 static cudaEventDestroy_t  real_cudaEventDestroy = nullptr;
+
+static ncclReduce_t real_ncclReduce = NULL;
+static ncclBroadcast_t real_ncclBroadcast = NULL;
 static ncclAllReduce_t real_ncclAllReduce = NULL;
 static ncclReduceScatter_t real_ncclReduceScatter = NULL;
 static ncclAllGather_t real_ncclAllGather = NULL;
 static ncclSendRecv_t real_ncclSendRecv = NULL;
+static ncclSend_t real_ncclSend = NULL;
+static ncclRecv_t real_ncclRecv = NULL;
+
+static cudaLaunchKernel_t real_cudaLaunchKernel = NULL;
+//static cudaLaunchKernelExC_t real_cudaLaunchKernelExC = NULL;
+//static cublasGemmEx_t real_cublasGemmEx = NULL;
+//static cublasGemmStridedBatchedEx_t real_cublasGemmStridedBatchedEx = NULL;
+//static cublasLtMatmul_t real_cublasLtMatmul = NULL;
+//static cublasSgemm_t real_cublasSgemm = NULL;
+//static cublasSgemmStridedBatched_t real_cublasSgemmStridedBatched = NULL;
 
 std::string time_str;
 
@@ -116,6 +155,25 @@ void init_logger(int rank) {
 void ensure_logger_initialized(char* rank) {
     int rk = std::atoi(rank);
     std::call_once(logger_init_flag, [&](){init_logger(rk); });
+}
+
+void printInterceptInfo(const char *func_name, CUstream stream, const char *str ,long long t ) {
+
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    logger->info("[{}] [Rank: {}] Intercepting Function {}  {}  stream {} time {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name,str,stream_event,t);
+}
+void print_cuda_info(const char* func_name,cudaStream_t stream,long long t) {
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+//    std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<<" stream "<< stream<<" time "<< t<< " verb " << func_name << std::endl;
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    // std::cout <<"RANK: " << getenv("OMPI_COMM_WORLD_RANK") << " stream " <<stream_event <<" "<<" Fuction "<<func_name<<std::endl;
+    logger->info("[{}] [Rank: {}] Intercepting Function {} stream {} time {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name,stream_event,t);
+    // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 
 void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
@@ -175,7 +233,7 @@ void watchdog_thread() {
                 auto event = event_queue.front();
                 event_queue.pop();
                 event_queue_lock.unlock();
-                
+
                 {
                     std::lock_guard<std::mutex> event_lock(event_list_mutex);
                     event_list.push_back(event);
@@ -193,12 +251,12 @@ void watchdog_thread() {
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
                     delete (*it);
-     		        it = event_list.erase(it);	
+     		        it = event_list.erase(it);
        			    continue;
     		    }
                 if(destroy_event_list.find((uintptr_t)((*it)->event)) != destroy_event_list.end() && (*it)->destroy == false){
                     (*it)->destroy = true;
-                    (*it)->end_time = destroy_event_list[(uintptr_t)((*it)->event)]; 
+                    (*it)->end_time = destroy_event_list[(uintptr_t)((*it)->event)];
                 }
                 it++;
             }
@@ -213,7 +271,7 @@ void watchdog_thread() {
                 if ((*it) == nullptr || (*it)->event == nullptr) {
                     // std::cout<<"start nullptr"<<std::endl;
                     delete (*it);
-                    it = event_list.erase(it);	
+                    it = event_list.erase(it);
                     continue;
                 }
                 if((*it)->destroy == true) {
@@ -236,16 +294,16 @@ void watchdog_thread() {
                         std::lock_guard<std::mutex> SET_lock(SET);
                         if(testS.find((uintptr_t)((*it)->event)) != testS.end()) {it++; continue;}
                     }
-                    auto Result = cudaEventQuery((*it)->event);                    
-                    
-                    
+                    auto Result = cudaEventQuery((*it)->event);
+
+
                     // std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     if (Result != cudaSuccess && Result != cudaErrorNotReady) {
                         delete (*it);
                         it = event_list.erase(it);
                         continue;
                     }
-                    
+
                     if(Result == cudaSuccess) {
                         std::lock_guard<std::mutex> SET_lock(SET);
                         delete (*it);
@@ -260,7 +318,7 @@ void watchdog_thread() {
                         if(now_us_count-((*it)->start_time) >= Hang_Time * 1000)
                             print_hang_info((*it),now_us_count);
                     }
-                    it++;  
+                    it++;
                 }
             }
         }
@@ -273,7 +331,7 @@ void watchdog_thread() {
     //         std::cout<<"all_dstroy_cnt:"<<destroy_count<<std::endl;
         }
 	    if (event_list.empty()) {
-            
+
        		std::lock_guard<std::mutex> guard(running_mutex);
        		watchdog_state.exchange(false);
 		    break;
@@ -298,7 +356,7 @@ extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t even
 //	std::cout<<"Insert Event"<<std::endl;
     	EventInfo* ev_info = new EventInfo(event,stream,now_us_count);
         ev_info->Life_time = 0;
-	    {	
+	    {
 		    std::lock_guard<std::mutex> event_queue_lock(event_queue_mutex);
     		event_queue.push(ev_info);
     	}
@@ -314,9 +372,9 @@ extern "C" cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     if (!real_cudaEventRecord) {
         real_cudaEventRecord = (cudaEventRecord_t)dlsym(RTLD_NEXT, "cudaEventRecord");
     }
-    
+
     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
-    
+
     print_event_info("cudaEventRecord", event);
     return real_cudaEventRecord(event,stream);
 }
@@ -433,3 +491,263 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
     print_nccl_info("ncclSendRecv",stream,now_us_count);
     return real_ncclSendRecv(sendbuff, sendcount, sendtype, peer_send, recvbuff, recvcount, recvtype, peer_recv, comm, stream);
 }
+
+
+extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclSend_t real_ncclSend = (ncclSend_t)dlsym(handle, "ncclSend");
+    if (!real_ncclSend) {
+        fprintf(stderr, "Cannot find symbol ncclSend: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclSend",stream,now_us_count);
+    return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
+}
+extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclRecv_t real_ncclRecv = (ncclRecv_t)dlsym(handle, "ncclRecv");
+    if (!real_ncclRecv) {
+        fprintf(stderr, "Cannot find symbol ncclSendRecv: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclRecv",stream,now_us_count);
+    return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
+}
+
+
+extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclReduce_t real_ncclReduce = (ncclReduce_t)dlsym(handle, "ncclReduce");
+    if (!real_ncclReduce) {
+        fprintf(stderr, "Cannot find symbol ncclReduce: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclReduce",stream,now_us_count);
+    return real_ncclReduce(sendbuff, recvbuff, count,  datatype, op, root,  comm, stream);
+}
+
+extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    if (!handle) {
+        fprintf(stderr, "%s\n", dlerror());
+    }
+    ncclBroadcast_t real_ncclBroadcast = (ncclBroadcast_t)dlsym(handle, "ncclBroadcast");
+    if (!real_ncclBroadcast) {
+        fprintf(stderr, "Cannot find symbol ncclBroadcast: %s\n", dlerror());
+        dlclose(handle);
+    }
+    dlclose(handle);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_nccl_info("ncclBroadcast",stream,now_us_count);
+    return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
+}
+
+
+// 拦截 cudaLaunchKernel
+cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim, void **args, size_t sharedMem, cudaStream_t stream) {
+
+    if (!real_cudaLaunchKernel) {
+        real_cudaLaunchKernel = (cudaLaunchKernel_t) dlsym(RTLD_NEXT, "cudaLaunchKernel");
+    }
+    char infoStr[128];
+    char *p = infoStr;
+    p += sprintf(p, "gridDim=(%u, %u, %u), ", gridDim.x, gridDim.y, gridDim.z);
+    sprintf(p, "blockDim=(%u, %u, %u)", blockDim.x, blockDim.y, blockDim.z);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    printInterceptInfo("cudaLaunchKernel", stream, infoStr,now_us_count);
+    return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
+}
+
+// Typedefs for the original functions
+
+// Intercept cudaFuncGetAttributes
+cudaError_t cudaFuncGetAttributes(struct cudaFuncAttributes *attr, const void *func) {
+    
+    if (!real_cudaFuncGetAttributes) {
+        real_cudaFuncGetAttributes = (real_cudaFuncGetAttributes_t)dlsym(RTLD_NEXT, "cudaFuncGetAttributes");
+    }
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    printInterceptInfo("cudainfo cudaFuncGetAttributes", 0, "Fetching function attributes",now_us_count);
+    return real_cudaFuncGetAttributes(attr, func);
+}
+
+// Intercept cudaMemcpyAsync
+cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) {
+    
+    if (!real_cudaMemcpyAsync) {
+        real_cudaMemcpyAsync = (real_cudaMemcpyAsync_t)dlsym(RTLD_NEXT, "cudaMemcpyAsync");
+    }
+    char infoStr[128];
+    char *p = infoStr;
+    p += sprintf(p, "count=%zu, ", count);
+    sprintf(p, "kind=%d", kind);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    printInterceptInfo("cudainfo cudaMemcpyAsync", stream, infoStr,now_us_count);
+    return real_cudaMemcpyAsync(dst, src, count, kind, stream);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+typedef CUresult (*real_cuLaunchKernel_t)(CUfunction, unsigned int, unsigned int, unsigned int,unsigned int, unsigned int, unsigned int,unsigned int, CUstream, void **, void **);
+CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,
+                        unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ,
+                        unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra) {
+    static orig_cuLaunchKernel_t orig_cuLaunchKernel = NULL;
+    if (!orig_cuLaunchKernel) {
+        orig_cuLaunchKernel = (orig_cuLaunchKernel_t)dlsym(RTLD_NEXT, "cuLaunchKernel");
+    }
+
+//    printf("Intercepted cuLaunchKernel: gridDim=(%u, %u, %u), blockDim=(%u, %u, %u)\n",
+//           gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ);
+
+    return orig_cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
+                               sharedMemBytes, hStream, kernelParams, extra);
+}
+CUresult cuLaunchKernel(CUfunction f, unsigned int gridDimX, unsigned int gridDimY, unsigned int gridDimZ,
+                        unsigned int blockDimX, unsigned int blockDimY, unsigned int blockDimZ,
+                        unsigned int sharedMemBytes, CUstream hStream, void **kernelParams, void **extra) {
+    static orig_cuLaunchKernel_t orig_cuLaunchKernel = NULL;
+    if (!orig_cuLaunchKernel) {
+        orig_cuLaunchKernel = (orig_cuLaunchKernel_t)dlsym(RTLD_NEXT, "cuLaunchKernel");
+        if (!orig_cuLaunchKernel) {
+            fprintf(stderr, "Error in dlsym: %s\n", dlerror());
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    if (!f || (!kernelParams && !extra)) {
+        fprintf(stderr, "Invalid parameters passed to cuLaunchKernel\n");
+        exit(EXIT_FAILURE);
+    }
+
+    char infoStr[128];
+    char *p = infoStr;
+    p += sprintf(p, "gridDim=(%u, %u, %u), ", gridDimX, gridDimY, gridDimZ);
+    sprintf(p, "blockDim=(%u, %u, %u)", blockDimX, blockDimY, blockDimZ);
+    printInterceptInfo("cuLaunchKernel", hStream, infoStr);
+
+    return orig_cuLaunchKernel(f, gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ,
+                               sharedMemBytes, hStream, kernelParams, extra);
+}
+// 拦截 cudaLaunchKernelExC
+cudaError_t cudaLaunchKernelExC(const void *func, dim3 gridDim, dim3 blockDim, void **args, size_t sharedMem, cudaStream_t stream, int flags, int version) {
+
+    if (!real_cudaLaunchKernelExC) {
+        real_cudaLaunchKernelExC = (cudaLaunchKernelExC_t) dlsym(RTLD_NEXT, "cudaLaunchKernelExC");
+    }
+
+    //printf("Intercepting cudaLaunchKernelExC\n");
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_cuda_info("NCCL cudaLaunchKernelExC",stream ,now_us_count);
+    return real_cudaLaunchKernelExC(func, gridDim, blockDim, args, sharedMem, stream, flags, version);
+}
+// 拦截 cublasGemmStridedBatchedEx
+cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb, int m, int n, int k, const void *alpha, const void *A, cudaDataType Atype, int lda, long long strideA, const void *B, cudaDataType Btype, int ldb, long long strideB, const void *beta, void *C, cudaDataType Ctype, int ldc, long long strideC, cudaDataType computeType, cublasGemmAlgo_t algo) {
+
+    if (!real_cublasGemmStridedBatchedEx) {
+        real_cublasGemmStridedBatchedEx = (cublasGemmStridedBatchedEx_t) dlsym(RTLD_NEXT, "cublasGemmStridedBatchedEx");
+    }
+
+    //printf("Intercepting cublasGemmStridedBatchedEx\n");
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_cuda_info("NCCL cublasGemmStridedBatchedEx",NULL,now_us_count);
+    return real_cublasGemmStridedBatchedEx(handle, transa, transb, m, n, k, alpha, A, Atype, lda, strideA, B, Btype, ldb, strideB, beta, C, Ctype, ldc, strideC, computeType, algo);
+}
+
+// 拦截 cublasLtMatmul
+cublasStatus_t cublasLtMatmul(void* ltHandle, void* operationDesc, const void* alpha, const void* A, const void* B, const void* beta, void* C, void* D, void* computeDesc, void* workspace, void* workspaceSizeInBytes, void* stream) {
+
+    if (!real_cublasLtMatmul) {
+        real_cublasLtMatmul = (cublasLtMatmul_t) dlsym(RTLD_NEXT, "cublasLtMatmul");
+    }
+
+    //printf("Intercepting cublasLtMatmul\n");
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_cuda_info("NCCL cublasLtMatmul",(cudaStream_t)stream ,now_us_count);
+    return real_cublasLtMatmul(ltHandle, operationDesc, alpha, A, B, beta, C, D, computeDesc, workspace, workspaceSizeInBytes, stream);
+}
+
+// 拦截 cublasSgemm
+cublasStatus_t cublasSgemm(cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb, int m, int n, int k, const float *alpha, const float *A, int lda, const float *B, int ldb, const float *beta, float *C, int ldc) {
+
+    if (!real_cublasSgemm) {
+        real_cublasSgemm = (cublasSgemm_t) dlsym(RTLD_NEXT, "cublasSgemm");
+    }
+
+    //printf("Intercepting cublasSgemm\n");
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_cuda_info("NCCL cublasSgemm",NULL ,now_us_count);
+    return real_cublasSgemm(handle, transa, transb, m, n, k, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+// 拦截 cublasSgemmStridedBatched
+cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb, int m, int n, int k, const float *alpha, const float *A, int lda, long long strideA, const float *B, int ldb, long long strideB, const float *beta, float *C, int ldc, long long strideC, int batchCount) {
+
+    if (!real_cublasSgemmStridedBatched) {
+        real_cublasSgemmStridedBatched = (cublasSgemmStridedBatched_t) dlsym(RTLD_NEXT, "cublasSgemmStridedBatched");
+    }
+
+    //printf("Intercepting cublasSgemmStridedBatched\n");
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    print_cuda_info("NCCL cublasSgemmStridedBatched",NULL , now_us_count);
+    return real_cublasSgemmStridedBatched(handle, transa, transb, m, n, k, alpha, A, lda, strideA, B, ldb, strideB, beta, C, ldc, strideC, batchCount);
+}
+*/

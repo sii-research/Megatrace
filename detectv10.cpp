@@ -176,14 +176,14 @@ void print_cuda_info(const char* func_name,cudaStream_t stream,long long t) {
     // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 
-void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
+void print_nccl_info(const char* func_name,cudaStream_t stream,long long count,long long t) {
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
 //    std::cout <<"RANK: "<< getenv("OMPI_COMM_WORLD_RANK")<<" stream "<< stream<<" time "<< t<< " verb " << func_name << std::endl;
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
     // std::cout <<"RANK: " << getenv("OMPI_COMM_WORLD_RANK") << " stream " <<stream_event <<" "<<" Fuction "<<func_name<<std::endl;
-    logger->info("[{}] [Rank: {}] NCCL Function {} called in stream {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, stream_event);
+    logger->info("[{}] [Rank: {}] NCCL Function {} size {} called in stream {}  " ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name,count, stream_event);
     // logger->info("Rank {}  stream {} time {} verb {}  ", getenv("OMPI_COMM_WORLD_RANK"),stream_event,t,func_name);
 }
 
@@ -431,7 +431,7 @@ extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclAllReduce",stream,now_us_count);
+    print_nccl_info("ncclAllReduce",stream,count,now_us_count);
     return real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
 }
 
@@ -450,7 +450,7 @@ extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, 
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclReduceScatter",stream,now_us_count);
+    print_nccl_info("ncclReduceScatter",stream,count,now_us_count);
     return real_ncclReduceScatter(sendbuff, recvbuff, count, datatype, op, comm, stream);
 }
 
@@ -469,7 +469,7 @@ extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclAllGather",stream,now_us_count);
+    print_nccl_info("ncclAllGather",stream,count,now_us_count);
     return real_ncclAllGather(sendbuff, recvbuff, count, datatype, comm, stream);
 }
 
@@ -488,7 +488,7 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclSendRecv",stream,now_us_count);
+    print_nccl_info("ncclSendRecv",stream,sendcount,now_us_count);
     return real_ncclSendRecv(sendbuff, sendcount, sendtype, peer_send, recvbuff, recvcount, recvtype, peer_recv, comm, stream);
 }
 
@@ -508,7 +508,7 @@ extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataTyp
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclSend",stream,now_us_count);
+    print_nccl_info("ncclSend",stream,count,now_us_count);
     return real_ncclSend(sendbuff, count, datatype, peer, comm, stream);
 }
 extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream) {
@@ -526,7 +526,7 @@ extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t da
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclRecv",stream,now_us_count);
+    print_nccl_info("ncclRecv",stream,count,now_us_count);
     return real_ncclRecv(recvbuff, count, datatype, peer, comm, stream);
 }
 
@@ -546,7 +546,7 @@ extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t 
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclReduce",stream,now_us_count);
+    print_nccl_info("ncclReduce",stream,count,now_us_count);
     return real_ncclReduce(sendbuff, recvbuff, count,  datatype, op, root,  comm, stream);
 }
 
@@ -565,7 +565,7 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    print_nccl_info("ncclBroadcast",stream,now_us_count);
+    print_nccl_info("ncclBroadcast",stream,count,now_us_count);
     return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
 

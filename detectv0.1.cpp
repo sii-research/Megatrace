@@ -85,11 +85,22 @@ typedef ncclResult_t (*ncclRecv_t)(void* recvbuff, size_t count, ncclDataType_t 
 
 
 typedef cudaError_t (*cudaLaunchKernel_t)(const void*, dim3, dim3, void**, size_t, cudaStream_t);
+typedef cudaError_t (*cudaFuncGetAttributes_t)(struct cudaFuncAttributes *, const void *);
+typedef cudaError_t (*cudaMemcpyAsync_t)(void *, const void *, size_t, cudaMemcpyKind, cudaStream_t);
 
-typedef cudaError_t (*real_cudaFuncGetAttributes_t)(struct cudaFuncAttributes *, const void *);
-typedef cudaError_t (*real_cudaMemcpyAsync_t)(void *, const void *, size_t, cudaMemcpyKind, cudaStream_t);
-static real_cudaFuncGetAttributes_t real_cudaFuncGetAttributes = NULL;
-static real_cudaMemcpyAsync_t real_cudaMemcpyAsync = NULL;
+static cudaLaunchKernel_t real_cudaLaunchKernel = nullptr;
+static cudaFuncGetAttributes_t real_cudaFuncGetAttributes = nullptr;
+static cudaMemcpyAsync_t real_cudaMemcpyAsync = nullptr;
+
+typedef CUresult (*cuLaunchKernelEx_t)(const CUlaunchConfig*,CUfunction,void**,void**);
+static cuLaunchKernelEx_t real_cuLaunchKernelEx = nullptr;
+
+typedef cudaError_t (*cudaLaunchHostFunc_t)(cudaStream_t stream, cudaHostFn_t fn, void *userData);
+static cudaLaunchHostFunc_t real_cudaLaunchHostFunc = nullptr;
+
+
+typedef cudaError_t (*cudaLaunchHostFunc_ptsz_t)(cudaStream_t stream, cudaHostFn_t fn, void *userData);
+static cudaLaunchHostFunc_ptsz_t real_cudaLaunchHostFunc_ptsz = nullptr;
 
 static cudaStreamWaitEvent_t real_cudaStreamWaitEvent = nullptr;
 static cudaEventRecord_t real_cudaEventRecord = nullptr;
@@ -105,7 +116,7 @@ static ncclSendRecv_t real_ncclSendRecv = NULL;
 static ncclSend_t real_ncclSend = NULL;
 static ncclRecv_t real_ncclRecv = NULL;
 
-static cudaLaunchKernel_t real_cudaLaunchKernel = NULL;
+
 
 std::string time_str;
 
@@ -156,7 +167,8 @@ void print_cuda_info(const char* func_name,cudaStream_t stream,long long t) {
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
-    logger->info("[{}] [Rank: {}] Intercepting Function {} stream {} time {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name,stream_event,t);
+    printf("rank %s, func_name %s,stream = %s\n",getenv("OMPI_COMM_WORLD_RANK"),func_name,stream_event.c_str());
+    //logger->info("[{}] [Rank: {}] Intercepting Function {} stream {} time {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name,stream_event,t);
 }
 
 void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
@@ -164,6 +176,7 @@ void print_nccl_info(const char* func_name,cudaStream_t stream,long long t) {
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
     std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    printf("rank %s, verb %s,stream = %s\n",getenv("OMPI_COMM_WORLD_RANK"),func_name,stream_event.c_str());
     logger->info("[{}] [Rank: {}] NCCL Function {} called in stream {}" ,now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, stream_event);
 }
 
@@ -171,7 +184,8 @@ void print_event_info(const char* func_name, cudaEvent_t event) {
     auto now = std::chrono::system_clock::now();
     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
     long long now_us_count = now_us.count();
-    logger->info("[{}] [Rank: {}] Function {} called with event {}",now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, uintptr_t(event));
+    printf("rank %s, func_name %s,event = %ld\n",getenv("OMPI_COMM_WORLD_RANK"),func_name,uintptr_t(event));
+    //logger->info("[{}] [Rank: {}] Function {} called with event {}",now_us_count,getenv("OMPI_COMM_WORLD_RANK"), func_name, uintptr_t(event));
 }
 
 void print_hang_info(EventInfo* ev,long long now_us_count){
@@ -311,7 +325,9 @@ extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t even
     auto now = std::chrono::system_clock::now();
 	auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
   	long long now_us_count = now_us.count();
- //   print_event_info("cudaStreamWaitEvent", event);
+    
+    print_cuda_info("cudaStreamWaitEvent",stream,0);
+    print_event_info("cudaStreamWaitEvent", event);
     std::lock_guard<std::mutex> SET_lock(SET);
     if(testS.find((uintptr_t)event) != testS.end()){}
     else{
@@ -336,8 +352,8 @@ extern "C" cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     }
 
     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
-
-    //print_event_info("cudaEventRecord", event);
+    print_cuda_info("cudaEventRecord",stream,0);
+    print_event_info("cudaEventRecord", event);
     return real_cudaEventRecord(event,stream);
 }
 // 拦截 cudaEventQuery
@@ -346,7 +362,7 @@ extern "C" cudaError_t cudaEventQuery(cudaEvent_t event) {
         real_cudaEventQuery = (cudaEventQuery_t)dlsym(RTLD_NEXT, "cudaEventQuery");
     }
     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
-    // print_event_info("cudaEventQuery", event);
+    print_event_info("cudaEventQuery", event);
     return real_cudaEventQuery(event);
 }
 extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {
@@ -367,7 +383,8 @@ extern "C" cudaError_t cudaEventDestroy(cudaEvent_t event) {
             destroy_event_queue.push(std::make_pair(event, now_us_count));
         }
     }
-    //print_event_info("cudaEventDestroy",event);
+    print_event_info("cudaEventDestroy",event);
+     
     return real_cudaEventDestroy(event);
 }
 
@@ -533,3 +550,147 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
     return real_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
 }
 
+// 拦截 cudaLaunchKernel
+// extern "C" cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim,
+//                                         void **args, size_t sharedMem, cudaStream_t stream) {
+//     if (!real_cudaLaunchKernel) {
+//         real_cudaLaunchKernel = (cudaLaunchKernel_t)dlsym(RTLD_NEXT, "cudaLaunchKernel_ptsz");
+//         if (!real_cudaLaunchKernel) {
+//             fprintf(stderr, "[ERROR] dlsym(cudaLaunchKernel_ptsz) failed: %s\n", dlerror());
+//             exit(EXIT_FAILURE);
+//         }
+//     }
+
+//     char infoStr[128];
+//     char *p = infoStr;
+//     p += sprintf(p, "gridDim=(%u, %u, %u), ", gridDim.x, gridDim.y, gridDim.z);
+//     sprintf(p, "blockDim=(%u, %u, %u)", blockDim.x, blockDim.y, blockDim.z);
+
+//     auto now = std::chrono::system_clock::now();
+//     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+//     long long now_us_count = now_us.count();
+
+//     printInterceptInfo("cudaLaunchKernel", stream, infoStr, now_us_count);
+
+//     return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
+// }
+
+
+
+
+extern "C" cudaError_t cudaLaunchKernel(const void *func, dim3 gridDim, dim3 blockDim, void **args, size_t sharedMem, cudaStream_t stream) {
+
+    if (!real_cudaLaunchKernel) {
+        real_cudaLaunchKernel = (cudaLaunchKernel_t) dlsym(RTLD_NEXT, "cudaLaunchKernel");
+    }
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    // 先打印 kernel 地址
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    printf("rank %s cudaLaunchKernel,stream = %s,[cudaLaunchKernel] func = %p, grid = (%d,%d,%d), block = (%d,%d,%d)\n",getenv("OMPI_COMM_WORLD_RANK"),stream_event.c_str(),
+           func, gridDim.x, gridDim.y, gridDim.z, blockDim.x, blockDim.y, blockDim.z);
+    // 尝试获取 kernel 属性（不包含名字，但可用于验证）
+    cudaFuncAttributes attr;
+    cudaError_t err = cudaFuncGetAttributes(&attr, func);
+    if (err == cudaSuccess) {
+        printf("\t--> sharedMemPerBlock = %zu, numRegs = %d, maxThreadsPerBlock = %d\n",
+               attr.sharedSizeBytes, attr.numRegs, attr.maxThreadsPerBlock);
+    } else {
+        printf("\t--> cudaFuncGetAttributes failed: %s\n", cudaGetErrorString(err));
+    }
+    return real_cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
+}
+
+
+extern "C" CUresult cuLaunchKernelEx(const CUlaunchConfig* config, CUfunction func, void** kernelParams, void** extra) {
+    if (!real_cuLaunchKernelEx) {
+        real_cuLaunchKernelEx = (cuLaunchKernelEx_t)dlsym(RTLD_NEXT, "cuLaunchKernelEx");
+    }
+
+    // 提取信息打印
+    printf("[HOOK] cuLaunchKernelEx called:");
+    printf("  func = %p ", func);
+    printf("  gridDim = (%d,%d,%d), blockDim = (%d,%d,%d), sharedMem = %u, stream = %p\n",
+           config->gridDimX, config->gridDimY, config->gridDimZ,
+           config->blockDimX, config->blockDimY, config->blockDimZ,
+           config->sharedMemBytes, config->hStream);
+
+    // 如果你想打印 kernel 名字，还可以使用 cuFuncGetAttribute，或 cuModuleGetFunctionName（自定义符号名映射）
+
+    return real_cuLaunchKernelEx(config, func, kernelParams, extra);
+}
+
+
+// Typedefs for the original functions
+
+// Intercept cudaFuncGetAttributes
+// extern "C" cudaError_t cudaFuncGetAttributes(struct cudaFuncAttributes *attr, const void *func) {
+    
+//     if (!real_cudaFuncGetAttributes) {
+//         real_cudaFuncGetAttributes = (cudaFuncGetAttributes_t)dlsym(RTLD_NEXT, "cudaFuncGetAttributes");
+//     }
+//     auto now = std::chrono::system_clock::now();
+//     auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+//     long long now_us_count = now_us.count();
+//     ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+//     //std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+//     printf(" rank %s cudaFuncGetAttributes \n",getenv("OMPI_COMM_WORLD_RANK"));
+//     printInterceptInfo("cudainfo cudaFuncGetAttributes", 0, "Fetching function attributes",now_us_count);
+//     return real_cudaFuncGetAttributes(attr, func);
+// }
+
+//Intercept cudaMemcpyAsync
+extern "C" cudaError_t cudaMemcpyAsync(void *dst, const void *src, size_t count, cudaMemcpyKind kind, cudaStream_t stream) {
+    
+    if (!real_cudaMemcpyAsync) {
+        real_cudaMemcpyAsync = (cudaMemcpyAsync_t)dlsym(RTLD_NEXT, "cudaMemcpyAsync"); 
+    }
+    char infoStr[128];
+    char *p = infoStr;
+    p += sprintf(p, "count=%zu, ", count);
+    sprintf(p, "kind=%d", kind);
+    auto now = std::chrono::system_clock::now();
+    auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+    long long now_us_count = now_us.count();
+    ensure_logger_initialized(getenv("OMPI_COMM_WORLD_RANK"));
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    printf(" rank %s cudaMemcpyAsync,stream = %s\n",getenv("OMPI_COMM_WORLD_RANK"),stream_event.c_str());
+    printInterceptInfo("cudainfo cudaMemcpyAsync", stream, infoStr,now_us_count);
+    return real_cudaMemcpyAsync(dst, src, count, kind, stream);
+}
+
+
+extern "C" cudaError_t cudaLaunchHostFunc(cudaStream_t stream, cudaHostFn_t fn, void *userData) {
+    printf("Attempting to load cudaLaunchHostFunc...\n");
+    // 获取实际的 cudaLaunchHostFunc 地址
+    if (!real_cudaLaunchHostFunc) {
+        real_cudaLaunchHostFunc = (cudaLaunchHostFunc_t)dlsym(RTLD_NEXT, "cudaLaunchHostFunc");
+    }
+    
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    printf("rank %s cudaLaunchHostFunc: stream = %s, fn = %p, userData = %p\n", getenv("OMPI_COMM_WORLD_RANK"),stream_event.c_str(), (void*)fn, userData);
+
+    // 可以进一步分析 userData 中的内容，如果它是指向特定数据的指针，可以打印它们
+
+    // 调用实际的 cudaLaunchHostFunc
+    return real_cudaLaunchHostFunc(stream, fn, userData);
+}
+
+extern "C" cudaError_t cudaLaunchHostFunc_ptsz(cudaStream_t stream, cudaHostFn_t fn, void *userData) {
+    //printf("Attempting to load cudaLaunchHostFunc_ptsz...\n");
+      // 获取实际的 cudaLaunchHostFunc_ptsz 地址
+    if (!real_cudaLaunchHostFunc_ptsz) {
+        real_cudaLaunchHostFunc_ptsz = (cudaLaunchHostFunc_ptsz_t)dlsym(RTLD_NEXT, "cudaLaunchHostFunc_ptsz");
+        if (!real_cudaLaunchHostFunc_ptsz) {
+            printf("Error: could not find cudaLaunchHostFunc_ptsz in symbol table\n");
+            return cudaErrorUnknown;
+        }
+    }
+
+    // 打印流、函数和用户数据地址
+    std::string stream_event = std::to_string(reinterpret_cast<std::uintptr_t>(stream));
+    printf("rank %s cudaLaunchHostFunc_ptsz: stream = %s, fn = %p, userData = %p\n", 
+            getenv("OMPI_COMM_WORLD_RANK"), stream_event.c_str(), (void*)fn, userData);
+
+    // 调用实际的 cudaLaunchHostFunc_ptsz
+    return real_cudaLaunchHostFunc_ptsz(stream, fn, userData);
+}

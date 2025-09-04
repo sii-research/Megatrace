@@ -28,8 +28,9 @@ g++ -shared -o nccl_intercept.so nccl_intercept_main.cpp ring_log.cc -ldl -fPIC 
 # Basic usage
 LD_PRELOAD=/path/to/megatrace_intercept/nccl_intercept.so your_mpi_program
 
-# With custom log path
-MEGATRACE_PATH=/path/to/logs/ LD_PRELOAD=/path/to/megatrace_intercept/nccl_intercept.so your_mpi_program
+# Enable and customize log path
+NCCL_MEGATRACE_ENABLE=1 NCCL_MEGATRACE_LOG_PATH=/path/to/logs/ \
+  LD_PRELOAD=/path/to/megatrace_intercept/nccl_intercept.so your_mpi_program
 ```
 
 ## Logging System
@@ -46,15 +47,30 @@ The interceptor supports four log levels controlled by the `MEGATRACE_LOG_LEVEL`
 ### Environment Variables
 
 ```bash
-# Set log level (default: ERROR)
+# Enable/disable Megatrace logging (default: 1)
+# 1: enabled, 0: disabled
+export NCCL_MEGATRACE_ENABLE=1
+
+# Directory to write per-rank log files (used when enabled; default: ./logs)
+export NCCL_MEGATRACE_LOG_PATH=/path/to/logs/
+
+# Sensitivity window in milliseconds for batch flushing (default: 3000)
+export NCCL_MEGATRACE_SENSTIME=3000
+
+# Set interceptor console log level (default: ERROR)
+# One of: ERROR, WARN, INFO, DEBUG
 export MEGATRACE_LOG_LEVEL=INFO
 
-# Set log output path
-export MEGATRACE_PATH=/path/to/logs/
-
-# MPI rank information (automatically detected)
+# MPI rank (auto-set by MPI runtimes like OpenMPI)
+# Shown here for completeness; usually you do not need to set it manually
 export OMPI_COMM_WORLD_RANK=0
 ```
+
+Notes:
+- `NCCL_MEGATRACE_ENABLE` controls whether interception events are logged into ring buffer and flushed to files.
+- When `NCCL_MEGATRACE_ENABLE` is set, log files are written under `NCCL_MEGATRACE_LOG_PATH` (default `./logs`).
+- `NCCL_MEGATRACE_SENSTIME` tunes how quickly the background thread flushes logs when traffic is low.
+- `MEGATRACE_LOG_LEVEL` controls stderr console logs emitted by the interceptor itself.
 
 ### Log Format
 
@@ -70,8 +86,9 @@ Format: `[timestamp] [Rank: X] [LEVEL] [file:line:function] message`
 # Run with INFO level logging
 MEGATRACE_LOG_LEVEL=INFO LD_PRELOAD=./nccl_intercept.so mpirun -np 4 your_program
 
-# Run with custom log directory
-MEGATRACE_PATH=/tmp/megatrace_logs/ MEGATRACE_LOG_LEVEL=WARN LD_PRELOAD=./nccl_intercept.so your_program
+# Run with custom log directory and enabled file logging
+NCCL_MEGATRACE_ENABLE=1 NCCL_MEGATRACE_LOG_PATH=/tmp/megatrace_logs/ \
+  MEGATRACE_LOG_LEVEL=WARN LD_PRELOAD=./nccl_intercept.so your_program
 ```
 
 ## Intercepted Functions

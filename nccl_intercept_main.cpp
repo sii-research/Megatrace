@@ -12,11 +12,31 @@
 #include <time.h>
 #include <unistd.h>
 #include <sched.h>
+#include "include/comm.h"
+#include <cstdlib>
+#include <cstring>
+#include <unordered_map>
+#include <mutex>
 
 // Global variables for log writer thread initialization control
 static std::atomic<bool> g_log_thread_initialized{false};
 static pthread_t g_log_thread_id = 0;
 static std::atomic<bool> g_log_thread_running{false};
+
+// Per-stream operation counters
+static std::mutex g_stream_opcount_mutex;
+static std::unordered_map<cudaStream_t, int64_t> g_stream_to_opcount;
+
+static inline int64_t next_opcount_for_stream(cudaStream_t stream) {
+    std::lock_guard<std::mutex> lock(g_stream_opcount_mutex);
+    int64_t &counter = g_stream_to_opcount[stream];
+    counter += 1;
+    return counter;
+}
+
+// Best-effort groupHash fetcher: if env NCCL_COMM_GROUPHASH_OFFSET is set to a byte offset
+// within ncclComm_t where groupHash resides, read it; otherwise fallback to pointer hash
+// Directly read groupHash from ncclComm now that internal headers are available
 
 // Initialize log writer thread - ensures only one initialization
 bool init_log_writer_thread() {
@@ -92,7 +112,8 @@ extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclAllReduce", stream, opCount, groupHash);
     }
     
@@ -124,7 +145,8 @@ extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, 
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclReduceScatter", stream, opCount, groupHash);
     }
     
@@ -156,7 +178,8 @@ extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclAllGather", stream, opCount, groupHash);
     }
     
@@ -188,7 +211,8 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, sendcount, "ncclSendRecv", stream, opCount, groupHash);
     }
     
@@ -220,7 +244,8 @@ extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataTyp
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclSend", stream, opCount, groupHash);
     }
     
@@ -236,7 +261,7 @@ extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t da
         return ncclSystemError;
     }
     if (!real_ncclRecv) {
-        real_ncclRecv = (ncclRecv_t)dlsym(handle, "ncclSendRecv");
+        real_ncclRecv = (ncclRecv_t)dlsym(handle, "ncclRecv");
         if (!real_ncclRecv) {
             LOG_ERROR("Cannot find symbol ncclRecv: %s", dlerror());
             dlclose(handle);
@@ -251,7 +276,8 @@ extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t da
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclRecv", stream, opCount, groupHash);
     }
     
@@ -283,7 +309,8 @@ extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t 
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclReduce", stream, opCount, groupHash);
     }
     
@@ -315,7 +342,8 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<uintptr_t>(comm));
+        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclBroadcast", stream, opCount, groupHash);
     }
     

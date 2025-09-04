@@ -3,13 +3,16 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <timer.h>
 #include <time.h>
 #include <sys/types.h>
 #include <string.h>
 #include <pthread.h>
 #include <signal.h>
+#include "socket.h"
+#include "nccl.h"
+#include "core.h"
 #include <atomic>   
-//#include "core.h"
 #include <cstring>
 #include <unistd.h>
 #include <cuda_runtime.h>

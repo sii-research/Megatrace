@@ -1,6 +1,8 @@
-#include "nccl.h"
+//#include "nccl.h"
+#define MEGA_CC
 #include "ring_log.h"
-#include "core.h"
+#include "log.h"
+//#include "core.h"
 #include <sys/un.h>
 #include <iostream>
 #include <fstream>
@@ -10,12 +12,13 @@
 #include <sstream>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include <chrono>
 
-const int nccl_megatrace_enable = ncclGetEnv("NCCL_MEGATRACE_ENABLE") ? atoi(ncclGetEnv("NCCL_MEGATRACE_ENABLE")) : 1;
-const char* nccl_megatrace_log_path = ncclGetEnv("NCCL_MEGATRACE_ENABLE")?ncclGetEnv("NCCL_MEGATRACE_LOG_PATH"):"./logs";
-const int nccl_sensitive_time = ncclGetEnv("NCCL_MEGATRACE_SENSTIME") ? atoi(ncclGetEnv("NCCL_MEGATRACE_SENSTIME")) : 3000;
+const int nccl_megatrace_enable = getenv("NCCL_MEGATRACE_ENABLE") ? atoi(getenv("NCCL_MEGATRACE_ENABLE")) : 1;
+const char* nccl_megatrace_log_path = getenv("NCCL_MEGATRACE_ENABLE") ? getenv("NCCL_MEGATRACE_LOG_PATH") : "./logs";
+const int nccl_sensitive_time = getenv("NCCL_MEGATRACE_SENSTIME") ? atoi(getenv("NCCL_MEGATRACE_SENSTIME")) : 3000;
 
 
 int64_t current_time_in_ms() {
@@ -100,7 +103,7 @@ int ring_buffer_pop_batch(ring_buffer_t *rb, log_entry_t *out_entries, int max_e
 void *log_writer_thread(void *arg) {
     const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
     if (rank_str == NULL) {
-        fprintf(stderr, "Error: Environment variable 'OMPI_COMM_RANK' not found.\n");
+        LOG_ERROR_SIMPLE("Environment variable 'OMPI_COMM_RANK' not found.");
         return NULL;
     }
     int rank = atoi(rank_str); // 将 rank 从字符串转换为整数
@@ -111,11 +114,11 @@ void *log_writer_thread(void *arg) {
     // 打开文件
     FILE *fp = fopen(filename, "w");
     if (!fp) {
-        perror("[Megatrace] open file error,file path not exist.\n");
+        LOG_ERROR_SIMPLE("open file error, file path may not exist. errno=%d msg=%s", errno, strerror(errno));
         return NULL;
     }
     if(rank == 0){ 
-	 INFO(NCCL_INIT,"[Megatrace] start log thread.\n");
+	 LOG_INFO_SIMPLE("[Megatrace] start log thread.");
     }
     log_entry_t logs[BATCH_SIZE];
     int save_iter=0;
@@ -125,11 +128,11 @@ void *log_writer_thread(void *arg) {
         int64_t time_diff = now - last;
         int num_logs = ring_buffer_count(&ring_nccl_log);   
 	    if (time_diff < nccl_sensitive_time || num_logs == 0) {       
-            printf("time_diff: %ld  num_logs: %d\n",time_diff,num_logs);
+            LOG_DEBUG("time_diff: %ld  num_logs: %d",time_diff,num_logs);
             sleep(1);  
         } else {            
                  save_iter++;
-                 printf("[save %d] save %d logs\n",save_iter,num_logs);
+                 LOG_INFO("[save %d] save %d logs",save_iter,num_logs);
                  int n_logs = ring_buffer_pop_batch(&ring_nccl_log, logs, num_logs);
                  for (int i = 0; i < n_logs; i++) {
                     fprintf(fp, "[save_count %d] %s\n", save_iter,logs[i].msg);

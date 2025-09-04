@@ -5,7 +5,7 @@
 #include <cublas_v2.h>
 #include <dlfcn.h>
 
-# cuda_intercept
+// cuda_intercept
 typedef cudaError_t (*cudaStreamWaitEvent_t)(cudaStream_t, cudaEvent_t, unsigned int);
 typedef cudaError_t (*cudaEventRecord_t)(cudaEvent_t, cudaStream_t);
 typedef cudaError_t (*cudaEventQuery_t)(cudaEvent_t);
@@ -23,7 +23,7 @@ static cudaEventDestroy_t  real_cudaEventDestroy = nullptr;
 static cudaLaunchKernel_t real_cudaLaunchKernel = NULL;
 
 
-# nccl_intercept
+// nccl_intercept
 typedef ncclResult_t  (*ncclReduce_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, int root, ncclComm_t comm, cudaStream_t stream);
 typedef ncclResult_t  (*ncclBroadcast_t)(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 typedef ncclResult_t (*ncclAllReduce_t)(const void*, void*, size_t, ncclDataType_t, ncclRedOp_t, ncclComm_t, cudaStream_t);

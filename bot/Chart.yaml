@@ -1,0 +1,39 @@
+apiVersion: v2
+name: venus-monitoring
+description: A comprehensive Kubernetes monitoring solution with Prometheus, Grafana, and various exporters
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+home: https://github.com/your-org/venus-monitoring
+sources:
+  - https://github.com/your-org/venus-monitoring
+maintainers:
+  - name: Your Name
+    email: your.email@example.com
+keywords:
+  - monitoring
+  - prometheus
+  - grafana
+  - kubernetes
+  - alerting
+dependencies:
+  - name: kube-prometheus-stack
+    version: "55.0.0"
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: kube-prometheus-stack.enabled
+  - name: nvidia-gpu-exporter
+    version: "0.1.0"
+    repository: "file://./charts/nvidia-gpu-exporter"
+    condition: nvidia-gpu-exporter.enabled
+  - name: harbor-exporter
+    version: "0.1.0"
+    repository: "file://./charts/harbor-exporter"
+    condition: harbor-exporter.enabled
+  - name: postgres-exporter
+    version: "0.1.0"
+    repository: "file://./charts/postgres-exporter"
+    condition: postgres-exporter.enabled
+  - name: volcano-scheduler
+    version: "0.1.0"
+    repository: "file://./charts/volcano-scheduler"
+    condition: volcano-scheduler.enabled

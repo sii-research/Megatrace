@@ -1,0 +1,140 @@
+{{- if .Values.ipmiExporter.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-ipmi-exporter
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "venus-monitoring.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: ipmi-exporter
+  template:
+    metadata:
+      labels:
+        {{- include "venus-monitoring.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: ipmi-exporter
+    spec:
+      {{- include "venus-monitoring.imagePullSecrets" . | nindent 6 }}
+      hostNetwork: true
+      hostPID: true
+      {{- if .Values.ipmiExporter.initContainer.enabled }}
+      initContainers:
+        - name: install-ipmitools
+          image: "{{ .Values.ipmiExporter.initContainer.image.repository }}:{{ .Values.ipmiExporter.initContainer.image.tag }}"
+          imagePullPolicy: {{ .Values.ipmiExporter.initContainer.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              apk add --no-cache ipmitool
+              cp /usr/bin/ipmitool /shared/ipmitool
+          volumeMounts:
+            - name: shared-tools
+              mountPath: /shared
+      {{- end }}
+      containers:
+        - name: ipmi-exporter
+          image: "{{ include "venus-monitoring.image" .Values.ipmiExporter.image }}"
+          imagePullPolicy: {{ .Values.ipmiExporter.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 9290
+              hostPort: 9290
+          args:
+            - --config.file=/etc/ipmi-exporter/ipmi.yml
+            - --web.listen-address=0.0.0.0:9290
+          env:
+            - name: IPMI_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "venus-monitoring.fullname" . }}-ipmi-credentials
+                  key: username
+            - name: IPMI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "venus-monitoring.fullname" . }}-ipmi-credentials
+                  key: password
+          volumeMounts:
+            - name: config
+              mountPath: /etc/ipmi-exporter
+              readOnly: true
+            {{- if .Values.ipmiExporter.initContainer.enabled }}
+            - name: shared-tools
+              mountPath: /usr/local/bin/ipmitool
+              subPath: ipmitool
+            {{- end }}
+          resources:
+            {{- toYaml .Values.ipmiExporter.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "venus-monitoring.fullname" . }}-ipmi-config
+        {{- if .Values.ipmiExporter.initContainer.enabled }}
+        - name: shared-tools
+          emptyDir: {}
+        {{- end }}
+      tolerations:
+        - effect: NoSchedule
+          operator: Exists
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-ipmi-config
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+data:
+  ipmi.yml: |
+    modules:
+    {{- range .Values.ipmiExporter.ipmi.modules }}
+      {{ .name }}:
+        {{- if .collectors }}
+        collectors:
+        {{- range .collectors }}
+          - {{ . }}
+        {{- end }}
+        {{- end }}
+        {{- if .overrides }}
+        overrides:
+        {{- range .overrides }}
+          {{ .name }}:
+            {{- if .enabled }}
+            enabled: {{ .enabled }}
+            {{- end }}
+        {{- end }}
+        {{- end }}
+    {{- end }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-ipmi-credentials
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  username: {{ .Values.ipmiExporter.ipmi.username | quote }}
+  password: {{ .Values.ipmiExporter.ipmi.password | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-ipmi-exporter
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.ipmiExporter.service.type }}
+  ports:
+    - name: metrics
+      port: {{ .Values.ipmiExporter.service.port }}
+      targetPort: 9290
+  selector:
+    {{- include "venus-monitoring.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: ipmi-exporter
+{{- end }}

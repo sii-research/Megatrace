@@ -1,0 +1,51 @@
+{{- if .Values.kubeStateMetrics.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-kube-state-metrics
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "venus-monitoring.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        {{- include "venus-monitoring.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: kube-state-metrics
+    spec:
+      {{- include "venus-monitoring.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: kube-state-metrics
+          image: "{{ include "venus-monitoring.image" .Values.kubeStateMetrics.image }}"
+          imagePullPolicy: {{ .Values.kubeStateMetrics.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: 8080
+          args:
+            - --port=8080
+            - --resources=certificatesigningrequests,configmaps,cronjobs,daemonsets,deployments,endpoints,horizontalpodautoscalers,ingresses,jobs,limitranges,mutatingwebhookconfigurations,namespaces,networkpolicies,nodes,persistentvolumeclaims,persistentvolumes,poddisruptionbudgets,pods,replicasets,replicationcontrollers,resourcequotas,secrets,services,statefulsets,storageclasses,validatingwebhookconfigurations,volumeattachments
+          resources:
+            {{- toYaml .Values.kubeStateMetrics.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-kube-state-metrics
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.kubeStateMetrics.service.type }}
+  ports:
+    - name: metrics
+      port: {{ .Values.kubeStateMetrics.service.port }}
+      targetPort: 8080
+  selector:
+    {{- include "venus-monitoring.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: kube-state-metrics
+{{- end }}

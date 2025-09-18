@@ -1,0 +1,21 @@
+{{- if .Values.additionalScrapeConfigs.etcd.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "venus-monitoring.fullname" . }}-additional-scrape-configs
+  namespace: {{ include "venus-monitoring.namespace" . }}
+  labels:
+    {{- include "venus-monitoring.labels" . | nindent 4 }}
+data:
+  prometheus-additional.yaml: |
+    - job_name: 'etcd'
+      static_configs:
+        - targets: ['localhost:2379']
+      scheme: https
+      tls_config:
+        cert_file: /etc/prometheus/secrets/etcd-client-cert/etcd-client.crt
+        key_file: /etc/prometheus/secrets/etcd-client-cert/etcd-client.key
+        insecure_skip_verify: true
+      scrape_interval: 30s
+      scrape_timeout: 10s
+{{- end }}

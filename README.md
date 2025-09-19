@@ -4,7 +4,7 @@
 <h1 align="center">Megatrace</h1>
 
 <p align="center">
-  <a href="https://example.com/paper">📄 Paper</a> | 
+  <a href="asset/Diagnosis_and_Localization_of_Anomalies_in_Distributed_LLM_Training.pdf">📄 Paper</a> | 
   <a href="asset/wechat_qrcode.png"><img src="asset/wechat.svg" width="16" height="16" style="vertical-align: middle;"> WeChat Group</a> | 
   <a href="README_zh.md">🇨🇳 Chinese</a>
 </p>

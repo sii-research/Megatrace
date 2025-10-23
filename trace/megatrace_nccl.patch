@@ -1133,7 +1133,7 @@ index cc38821..0e896a7 100644
            int needFlush = 0;
            int totalSize = 0;
 diff --git a/src/transport/net_ib.cc b/src/transport/net_ib.cc
-index 551ca61..4f87c81 100644
+index 551ca61..ab6fc2d 100644
 --- a/src/transport/net_ib.cc
 +++ b/src/transport/net_ib.cc
 @@ -24,11 +24,25 @@
@@ -1568,15 +1568,7 @@ index 551ca61..4f87c81 100644
  
      for (int i = 0; i < comm->base.ndevs; i++) {
        struct ncclIbRecvCommDev* commDev = comm->devs + i;
-@@ -1986,7 +2172,6 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
-         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
-       }
-       if (commDev->fifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->fifoMr));
--      if (commDev->sizesFifoMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->sizesFifoMr));
-       NCCLCHECK(ncclIbDestroyBase(&commDev->base));
-     }
-     free(comm);
-@@ -2003,6 +2188,46 @@ ncclResult_t ncclIbCloseListen(void* listenComm) {
+@@ -2003,6 +2189,46 @@ ncclResult_t ncclIbCloseListen(void* listenComm) {
    return ncclSuccess;
  }
  

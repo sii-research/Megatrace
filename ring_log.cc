@@ -101,15 +101,44 @@ int ring_buffer_pop_batch(ring_buffer_t *rb, log_entry_t *out_entries, int max_e
  * 刷新策略：  * 1. 如果缓冲区中日志数量达到 BATCH_SIZE，则立即写入。
  * 2. 如果日志数量不足，但距离上次刷新超过 FLUSH_INTERVAL_US，则写入所有已有日志。  */
 void *log_writer_thread(void *arg) {
+    // const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    // if (rank_str == NULL) {
+    //     LOG_ERROR_SIMPLE("Environment variable 'OMPI_COMM_RANK' not found.");
+    //     return NULL;
+    // }
+    // int rank = atoi(rank_str); // 将 rank 从字符串转换为整数
+    // // 定义文件路径
+    // char filename[256];
+    // snprintf(filename, sizeof(filename), "%s/rank_%d.log", nccl_megatrace_log_path, rank);
+
+     // 获取节点IP地址环境变量
+    const char *node_ip = getenv("MY_POD_IP");
+    if (node_ip == NULL) {
+        node_ip = "unknown";
+    }
+
+    // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
     const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
     if (rank_str == NULL) {
-        LOG_ERROR_SIMPLE("Environment variable 'OMPI_COMM_RANK' not found.");
+        rank_str = getenv("RANK");
+    }
+    if (rank_str == NULL) {
+        LOG_ERROR_SIMPLE("Environment variable 'OMPI_COMM_WORLD_RANK' or 'RANK' not found.");
         return NULL;
     }
     int rank = atoi(rank_str); // 将 rank 从字符串转换为整数
-    // 定义文件路径
+
+    // 获取当前时间
+    time_t rawtime;
+    struct tm *timeinfo;
+    char time_buffer[80];
+    time(&rawtime);
+    timeinfo = localtime(&rawtime);
+    strftime(time_buffer, sizeof(time_buffer), "%Y%m%d_%H%M%S", timeinfo);
+
+    // 定义文件路径，使用IP地址和时间戳作为文件名头部
     char filename[256];
-    snprintf(filename, sizeof(filename), "%s/rank_%d.log", nccl_megatrace_log_path, rank);
+    snprintf(filename, sizeof(filename), "%s/%s_%s_rank_%d.log", nccl_megatrace_log_path, node_ip, time_buffer, rank);
 
     // 打开文件
     FILE *fp = fopen(filename, "w");
@@ -151,8 +180,14 @@ void log_event(struct timespec time_api, size_t count, const char* opName, cudaS
     char log_msg[LOG_MAX_LEN];
     char time_str[64];
     snprintf(time_str, sizeof(time_str), "%ld.%09ld", time_api.tv_sec, time_api.tv_nsec);
+    // const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    // int rank = atoi(rank_str);
+    // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
     const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
-    int rank = atoi(rank_str);
+    if (rank_str == NULL) {
+        rank_str = getenv("RANK");
+    }
+    int rank = (rank_str != NULL) ? atoi(rank_str) : 0;
     // 格式化日志内容
     snprintf(log_msg, sizeof(log_msg), "[%s] [Rank %d] Fun %s Data %zu stream %p opCount %ld groupHash %ld",
              time_str,rank ,opName, count, (void*)stream,opCount,groupHash);

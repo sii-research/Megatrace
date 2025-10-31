@@ -32,6 +32,7 @@ typedef ncclResult_t (*ncclAllGather_t)(const void*, void*, size_t, ncclDataType
 typedef ncclResult_t (*ncclSendRecv_t)(const void*, size_t, ncclDataType_t, int, void*, size_t, ncclDataType_t, int, ncclComm_t, cudaStream_t);
 typedef ncclResult_t (*ncclSend_t)(const void* sendbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
 typedef ncclResult_t (*ncclRecv_t)(void* recvbuff, size_t count, ncclDataType_t datatype, int peer, ncclComm_t comm, cudaStream_t stream);
+typedef ncclResult_t (*ncclCommInitRank_t)(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) ;
 
 static ncclReduce_t real_ncclReduce = NULL;
 static ncclBroadcast_t real_ncclBroadcast = NULL;
@@ -41,5 +42,8 @@ static ncclAllGather_t real_ncclAllGather = NULL;
 static ncclSendRecv_t real_ncclSendRecv = NULL;
 static ncclSend_t real_ncclSend = NULL;
 static ncclRecv_t real_ncclRecv = NULL;
-
+static ncclCommInitRank_t real_ncclCommInitRank=NULL;
+uint64_t hashUniqueId(ncclUniqueId const &id);
+ncclUniqueId getCommIdByComm(ncclComm_t comm);
+ncclComm_t getCommByCommId(ncclUniqueId commId);
 #endif

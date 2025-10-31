@@ -34,6 +34,61 @@ static inline int64_t next_opcount_for_stream(cudaStream_t stream) {
     return counter;
 }
 
+// 自定义哈希函数和相等比较函数
+struct NcclUniqueIdHash {
+    std::size_t operator()(const ncclUniqueId& id) const {
+        char const *bytes = (char const*)&id;
+        std::size_t h = 0xdeadbeef;
+        for(int i = 0; i < (int)sizeof(ncclUniqueId); i++) {
+            h ^= h >> 32;
+            h *= 0x8db3db47fa2994ad;
+            h += bytes[i];
+        }
+        return h;
+    }
+};
+
+struct NcclUniqueIdEqual {
+    bool operator()(const ncclUniqueId& lhs, const ncclUniqueId& rhs) const {
+        return memcmp(&lhs, &rhs, sizeof(ncclUniqueId)) == 0;
+    }
+};
+
+// 全局映射表，使用自定义的哈希和相等比较函数
+static std::mutex g_comm_mapping_mutex;
+static std::unordered_map<ncclUniqueId, ncclComm_t, NcclUniqueIdHash, NcclUniqueIdEqual> g_comm_id_to_comm;
+static std::unordered_map<ncclComm_t, ncclUniqueId, std::hash<void*>, std::equal_to<void*>> g_comm_to_comm_id;
+// 辅助函数：根据comm获取commId
+ncclUniqueId getCommIdByComm(ncclComm_t comm) {
+    std::lock_guard<std::mutex> lock(g_comm_mapping_mutex);
+    auto it = g_comm_to_comm_id.find(comm);
+    if (it != g_comm_to_comm_id.end()) {
+        return it->second;
+    }
+    // 返回空的commId（所有字段为0）
+    ncclUniqueId emptyId = {0};
+    return emptyId;
+}
+
+// 辅助函数：根据commId获取comm
+ncclComm_t getCommByCommId(ncclUniqueId commId) {
+    std::lock_guard<std::mutex> lock(g_comm_mapping_mutex);
+    auto it = g_comm_id_to_comm.find(commId);
+    if (it != g_comm_id_to_comm.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+uint64_t hashUniqueId(ncclUniqueId const &id) {
+    char const *bytes = (char const*)&id;
+    uint64_t h = 0xdeadbeef;
+    for(int i = 0; i < (int)sizeof(ncclUniqueId); i++) {
+        h ^= h >> 32;
+        h *= 0x8db3db47fa2994ad;
+        h += bytes[i];
+    }
+    return h;
+}
 // Best-effort groupHash fetcher: if env NCCL_COMM_GROUPHASH_OFFSET is set to a byte offset
 // within ncclComm_t where groupHash resides, read it; otherwise fallback to pointer hash
 // Directly read groupHash from ncclComm now that internal headers are available
@@ -89,6 +144,36 @@ bool init_log_writer_thread() {
 
 // Individual NCCL function implementations with direct parameter access
 
+//拦截ncclCommInitRank，获取comm和commid的映射
+extern "C" ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank) {
+    void* handle = dlopen("libnccl.so", RTLD_LAZY);
+    if (!handle) {
+        LOG_ERROR("Failed to dlopen libnccl.so: %s", dlerror());
+        return ncclSystemError;
+    }
+    
+    if (!real_ncclCommInitRank) {
+        real_ncclCommInitRank = (ncclCommInitRank_t)dlsym(handle, "ncclCommInitRank");
+        if (!real_ncclCommInitRank) {
+            LOG_ERROR("Cannot find symbol ncclCommInitRank: %s", dlerror());
+            dlclose(handle);
+            return ncclSystemError;
+        }
+    }
+    
+    ncclResult_t result = real_ncclCommInitRank(comm, nranks, commId, rank);
+    
+    // 如果初始化成功，建立映射关系
+    if (result == ncclSuccess && comm && *comm) {
+        std::lock_guard<std::mutex> lock(g_comm_mapping_mutex);
+        g_comm_id_to_comm[commId] = *comm;
+        g_comm_to_comm_id[*comm] = commId;
+    }
+    
+    dlclose(handle);
+    return result;
+}
+
 extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size_t count, ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
     void* handle = dlopen("libnccl.so", RTLD_LAZY);
     if (!handle) {
@@ -112,12 +197,18 @@ extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->commHash);
+
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
+
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclAllReduce", stream, opCount, groupHash);
     }
     
     ncclResult_t result = real_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
+
     dlclose(handle);
     return result;
 }
@@ -145,7 +236,10 @@ extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, 
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
+
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclReduceScatter", stream, opCount, groupHash);
     }
@@ -178,7 +272,9 @@ extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclAllGather", stream, opCount, groupHash);
     }
@@ -211,7 +307,9 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, sendcount, "ncclSendRecv", stream, opCount, groupHash);
     }
@@ -244,7 +342,9 @@ extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataTyp
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclSend", stream, opCount, groupHash);
     }
@@ -276,7 +376,9 @@ extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t da
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclRecv", stream, opCount, groupHash);
     }
@@ -309,7 +411,10 @@ extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t 
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
+        
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclReduce", stream, opCount, groupHash);
     }
@@ -342,7 +447,10 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
     if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE) {
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
-        int64_t groupHash = static_cast<int64_t>(reinterpret_cast<ncclComm*>(comm)->groupHash);
+        // 获取commId并通过hash函数计算groupHash
+        ncclUniqueId commId = getCommIdByComm(comm);
+        uint64_t groupHash = hashUniqueId(commId);
+        
         int64_t opCount = next_opcount_for_stream(stream);
         log_event(ts, count, "ncclBroadcast", stream, opCount, groupHash);
     }

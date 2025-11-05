@@ -174,23 +174,43 @@ void *log_writer_thread(void *arg) {
     return NULL;
 }
 
-void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,int64_t groupHash) {
-    //log_event(time_api, info->count, info->opName, info->stream, info->comm->opCount,info->count,info->comm,);
-    // 用于格式化日志信息
-    char log_msg[LOG_MAX_LEN];
-    char time_str[64];
-    snprintf(time_str, sizeof(time_str), "%ld.%09ld", time_api.tv_sec, time_api.tv_nsec);
-    // const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
-    // int rank = atoi(rank_str);
-    // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
-    const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
-    if (rank_str == NULL) {
-        rank_str = getenv("RANK");
+    void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,uint64_t groupHash) {
+        //log_event(time_api, info->count, info->opName, info->stream, info->comm->opCount,info->count,info->comm,);
+        // 用于格式化日志信息
+        char log_msg[LOG_MAX_LEN];
+        char time_str[64];
+        snprintf(time_str, sizeof(time_str), "%ld.%09ld", time_api.tv_sec, time_api.tv_nsec);
+        // const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+        // int rank = atoi(rank_str);
+        // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
+        const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+        if (rank_str == NULL) {
+            rank_str = getenv("RANK");
+        }
+        int rank = (rank_str != NULL) ? atoi(rank_str) : 0;
+        // 格式化日志内容
+        snprintf(log_msg, sizeof(log_msg), "[%s] [Rank %d] Fun %s Data %zu stream %p opCount %lld groupHash 0x%016llx",
+                time_str, rank, opName, count, (void*)stream, (long long)opCount, (unsigned long long)groupHash);
+        //int num = ring_buffer_count(&ring_nccl_log);
+        ring_buffer_push(&ring_nccl_log, log_msg);
     }
-    int rank = (rank_str != NULL) ? atoi(rank_str) : 0;
-    // 格式化日志内容
-    snprintf(log_msg, sizeof(log_msg), "[%s] [Rank %d] Fun %s Data %zu stream %p opCount %ld groupHash %ld",
-             time_str,rank ,opName, count, (void*)stream,opCount,groupHash);
-    //int num = ring_buffer_count(&ring_nccl_log);
-    ring_buffer_push(&ring_nccl_log, log_msg);
-}
+    // void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,int64_t groupHash) {
+    //     //log_event(time_api, info->count, info->opName, info->stream, info->comm->opCount,info->count,info->comm,);
+    //     // 用于格式化日志信息
+    //     char log_msg[LOG_MAX_LEN];
+    //     char time_str[64];
+    //     snprintf(time_str, sizeof(time_str), "%ld.%09ld", time_api.tv_sec, time_api.tv_nsec);
+    //     // const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    //     // int rank = atoi(rank_str);
+    //     // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
+    //     const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    //     if (rank_str == NULL) {
+    //         rank_str = getenv("RANK");
+    //     }
+    //     int rank = (rank_str != NULL) ? atoi(rank_str) : 0;
+    //     // 格式化日志内容
+    //     snprintf(log_msg, sizeof(log_msg), "[%s] [Rank %d] Fun %s Data %zu stream %p opCount %ld groupHash %ld",
+    //              time_str,rank ,opName, count, (void*)stream,opCount,groupHash);
+    //     //int num = ring_buffer_count(&ring_nccl_log);
+    //     ring_buffer_push(&ring_nccl_log, log_msg);
+    // }

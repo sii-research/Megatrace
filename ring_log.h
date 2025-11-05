@@ -52,8 +52,8 @@ int ring_buffer_count(ring_buffer_t *rb) ;
 int ring_buffer_push(ring_buffer_t *rb, const char *msg);
 int ring_buffer_pop_batch(ring_buffer_t *rb, log_entry_t *out_entries, int max_entries) ;
 void *log_writer_thread(void *arg) ;
-void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,int64_t groupHash);
-
+void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,uint64_t groupHash);
+//void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,int64_t groupHash);
 
 
 #ifdef MEGA_CC

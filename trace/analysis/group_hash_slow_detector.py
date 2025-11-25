@@ -341,7 +341,6 @@ class GroupHashSlowDetector:
 
         for i, group_hash in enumerate(unique_groups):
             self.group_mapping[group_hash] = i + 1
-        # print("3333333333333333333333333333333333")
         for group_hash, operations in self.operations_by_group.items():
             if len(operations) < 2:
                 continue  # Need at least 2 operations to compare
@@ -354,7 +353,6 @@ class GroupHashSlowDetector:
                 op_groups[op_key].append((op.rank, op.timestamp, op.data_size))
             
             # For each operation group, find the slowest rank
-            # print("################内部循环################")
             for op_key, rank_timestamps in op_groups.items():
                 if len(rank_timestamps) < 2:
                     continue  # Need at least 2 ranks for comparison
@@ -455,7 +453,6 @@ class GroupHashSlowDetector:
     
     def print_slow_rank_summary(self):
         """Print a summary of slow rank analysis"""
-        # print("开始print_slow_rank_summary, group_performance: ")
         if not self.group_performance:
             print("No performance data found. Please analyze performance first.")
             return
@@ -603,7 +600,6 @@ class GroupHashSlowDetector:
     
     def run_analysis(self):
         """Run complete analysis pipeline"""
-        # print("开始run_analysis, logs_path: ")
         print("Starting Group Hash based slow rank analysis...")
         
         # Parse logs

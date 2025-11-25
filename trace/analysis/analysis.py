@@ -9,18 +9,16 @@ import os
 import sys
 import argparse
 import logging
-import re
-import gzip
-import bz2
 import yaml
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import time
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from datetime import datetime
 from dataclasses import dataclass
 import numpy as np
-import math
+
+from log_reader import LogEntry, LogReader
 
 # Import time pattern analyzer
 try:
@@ -29,51 +27,26 @@ except ImportError:
     TimePatternAnalyzer = None
 
 
-# Define log entry data structure
-class LogEntry:
-    """Single log entry data structure"""
-    def __init__(self, raw_line: str, save_count: int, timestamp: float, 
-                 rank: int, function: str, data_size: int, stream: str, op_count: int, group_hash: str = None):
-        self.raw_line = raw_line
-        self.save_count = save_count
-        self.timestamp = timestamp
-        self.rank = rank
-        self.function = function
-        self.data_size = data_size
-        self.stream = stream
-        self.op_count = op_count
-        self.group_hash = group_hash
-    
-    def __str__(self):
-        if self.group_hash:
-            return f"[save_count {self.save_count}] [{self.timestamp}] [Rank {self.rank}] Fun {self.function} Data {self.data_size} stream {self.stream} opCount {self.op_count} groupHash {self.group_hash}"
-        else:
-            return f"[save_count {self.save_count}] [{self.timestamp}] [Rank {self.rank}] Fun {self.function} Data {self.data_size} stream {self.stream} opCount {self.op_count}"
-
-
 class DistributedLogAnalyzer:
     """Distributed Training Log Analyzer Main Class"""
     
-    def __init__(self, log_path: str, verbose: bool = False):
+    def __init__(self, log_path: str = None,
+                 verbose: bool = False, max_save_count_groups: Optional[int] = 2):
         """
         Initialize Distributed Log Analyzer
         
         Args:
             log_path: Path to log file or directory to analyze
             verbose: Whether to show detailed log output
+            max_save_count_groups: Number of most recent save_count groups to load from local files
+                                   (None or <=0 means load entire file)
         """
-        self.log_path = Path(log_path)
-        self.log_files = []
+        self.log_path = Path(log_path) if log_path else None
         self.analysis_results = {}
         self.verbose = verbose
-        
+        self.max_save_count_groups = max_save_count_groups if (max_save_count_groups is None or max_save_count_groups >= 0) else None
         # Setup logging
         self._setup_logging()
-        
-        # Define regex pattern for log parsing
-        self.log_pattern = re.compile(
-            r'\[save_count (\d+)\] \[([\d.]+)\] \[Rank (\d+)\] Fun (\w+) Data (\d+) stream (0x[0-9a-fA-F]+) opCount (\d+)(?: groupHash (-?\d+))?'
-        )
         
     def _setup_logging(self):
         """Setup logging configuration"""
@@ -106,107 +79,6 @@ class DistributedLogAnalyzer:
         
         self.logger = logging.getLogger(__name__)
         
-    def discover_log_files(self) -> List[Path]:
-        """
-        1. Traverse log files in folder
-        
-        Returns:
-            List containing all log file paths
-        """
-        log_extensions = {'.log', '.txt', '.out', '.err'}
-        
-        if self.log_path.is_file():
-            # If it's a single file
-            if self.log_path.suffix.lower() in log_extensions:
-                self.log_files = [self.log_path]
-                self.logger.info(f"Found single log file: {self.log_path}")
-            else:
-                self.logger.warning(f"File {self.log_path} is not a log file")
-                return []
-        elif self.log_path.is_dir():
-            # If it's a directory, recursively find all log files
-            self.log_files = []
-            for file_path in self.log_path.rglob('*'):
-                if file_path.is_file() and file_path.suffix.lower() in log_extensions:
-                    self.log_files.append(file_path)
-            
-            self.logger.info(f"Found {len(self.log_files)} log files in directory {self.log_path}")
-        else:
-            self.logger.error(f"Path {self.log_path} does not exist")
-            return []
-            
-        return self.log_files
-    
-    def read_log_file(self, file_path: Path) -> List[str]:
-        """Read all lines from log file"""
-        lines = []
-        try:
-            if file_path.suffix.lower() == '.gz':
-                with gzip.open(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            elif file_path.suffix.lower() == '.bz2':
-                with bz2.open(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            else:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            
-            # Remove newline characters from each line
-            lines = [line.rstrip('\n\r') for line in lines]
-            self.logger.info(f"File {file_path} read completed, total {len(lines)} lines")
-            
-        except Exception as e:
-            self.logger.error(f"Error reading file {file_path}: {e}")
-            return []
-        
-        return lines
-    
-    def parse_log_line(self, line: str) -> Optional[LogEntry]:
-        """Parse single log line"""
-        match = self.log_pattern.match(line)
-        if match:
-            save_count = int(match.group(1))
-            timestamp = float(match.group(2))
-            rank = int(match.group(3))
-            function = match.group(4)
-            data_size = int(match.group(5))
-            stream = match.group(6)
-            op_count = int(match.group(7))
-            group_hash = match.group(8) # Get groupHash if it exists
-            
-            return LogEntry(line, save_count, timestamp, rank, function, data_size, stream, op_count, group_hash)
-        
-        return None
-    
-    def parse_log_files(self) -> Dict[int, List[LogEntry]]:
-        """
-        2. Read logs for each rank and mark rank numbers
-        3. Analyze last save_count group log entries
-        
-        Returns:
-            Log entries organized by rank dictionary
-        """
-        rank_entries = defaultdict(list)
-        
-        for log_file in self.log_files:
-            self.logger.info(f"Starting to parse file: {log_file}")
-            lines = self.read_log_file(log_file)
-            
-            for line in lines:
-                entry = self.parse_log_line(line)
-                if entry:
-                    rank_entries[entry.rank].append(entry)
-        
-        # Sort entries by time for each rank
-        for rank in rank_entries:
-            rank_entries[rank].sort(key=lambda x: x.timestamp)
-        
-        self.logger.info(f"Parsing completed, found logs for {len(rank_entries)} ranks")
-        for rank, entries in rank_entries.items():
-            self.logger.info(f"Rank {rank}: {len(entries)} records")
-        
-        return rank_entries
-    
     def get_last_save_count_group(self, rank_entries: Dict[int, List[LogEntry]]) -> Dict[int, List[LogEntry]]:
         """
         Get last save_count group log entries for each rank
@@ -1174,22 +1046,13 @@ class DistributedLogAnalyzer:
         
         print("\n" + "="*60)
     
-    def run(self):
-        """Run complete hang detection analysis"""
+    def run(self, rank_entries: Dict[int, List[LogEntry]]):
+        """Run complete hang detection analysis on pre-loaded rank entries."""
         self.logger.info("=" * 60)
         self.logger.info("Starting Distributed Training Log Hang Detection Analysis")
         self.logger.info("=" * 60)
         
         try:
-            # 1. Traverse log files in folder
-            self.discover_log_files()
-            if not self.log_files:
-                self.logger.error("No log files found for analysis")
-            return
-            
-            # 2. Read logs for each rank and mark rank numbers
-            # 3. Analyze last save_count group log entries
-            rank_entries = self.parse_log_files()
             if not rank_entries:
                 self.logger.error("No valid log entries parsed")
                 return
@@ -1260,9 +1123,13 @@ def main():
     
     args = parser.parse_args()
     
-    # Create analyzer and run
+    # Load logs with LogReader, then analyze
+    reader = LogReader(log_path=args.log_path)
+    reader.discover_log_files()
+    rank_entries = reader.parse_log_files()
+    
     analyzer = DistributedLogAnalyzer(args.log_path, args.verbose)
-    analyzer.run()
+    analyzer.run(rank_entries)
 
 
 if __name__ == '__main__':

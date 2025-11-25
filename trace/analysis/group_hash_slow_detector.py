@@ -7,16 +7,19 @@ Analyzes performance differences within communication groups identified by group
 
 import os
 import re
+import gzip
+import bz2
 import yaml
-from typing import Dict, List, Tuple, Set, Optional
+from typing import Dict, List, Tuple, Set, Optional, Any
+from pathlib import Path
 from dataclasses import dataclass
 from collections import defaultdict
-import glob
-import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 import numpy as np
 import math
+from datetime import datetime
+from log_reader import LogEntry
+
 
 # Grubbs' test critical values for alpha=0.05 (one-sided, max outlier)
 GRUBBS_CRITICAL_VALUES = {
@@ -57,166 +60,272 @@ class GroupPerformance:
     outlier_count: int = 0
 
 class GroupHashSlowDetector:
+
     """Detector for slow nodes in communication groups identified by groupHash"""
     
-    def __init__(self, logs_path: str, verbose: bool = False, use_multiprocessing: bool = True):
-        self.logs_path = logs_path
+    def __init__(
+        self,
+        # logs_path: str = None,
+        verbose: bool = False,
+        use_multiprocessing: bool = True,
+        max_save_count_groups: Optional[int] = 2,
+    ):
+        # self.logs_path = logs_path
+
         self.verbose = verbose
         self.use_multiprocessing = use_multiprocessing
         self.operations_by_group = defaultdict(list)  # groupHash -> List[GroupHashOp]
         self.group_performance = {}  # groupHash -> GroupPerformance
         self.rank_slow_counts = defaultdict(dict)  # rank -> group_id -> slow_count
         self.group_mapping = {}  # groupHash -> group_id (for display)
+        self.max_save_count_groups = (
+            max_save_count_groups if (max_save_count_groups is None or max_save_count_groups >= 0) else None
+        )
+        self._save_count_pattern = re.compile(r'\[save_count (\d+)\]')
         
-    def check_log_files(self) -> bool:
-        """Check if log files exist and can be processed"""
-        if self.verbose:
-            print(f"Scanning for log files in {self.logs_path}...")
+    # def check_log_files(self) -> bool:
+    #     """Check if log files exist and can be processed"""
+    #     if self.verbose:
+    #         print(f"Scanning for log files in {self.logs_path}...")
             
-        log_files = glob.glob(os.path.join(self.logs_path, "*.log"))
-        log_count = len(log_files)
+    #     log_files = glob.glob(os.path.join(self.logs_path, "*.log"))
+    #     log_count = len(log_files)
         
-        if self.verbose:
-            print(f"Found {log_count} log files:")
-            for i, log_file in enumerate(sorted(log_files)[:5]):
-                print(f"  • {os.path.basename(log_file)}")
-            if log_count > 5:
-                print(f"  • ... and {log_count - 5} more files")
+    #     if self.verbose:
+    #         print(f"Found {log_count} log files:")
+    #         for i, log_file in enumerate(sorted(log_files)[:5]):
+    #             print(f"  • {os.path.basename(log_file)}")
+    #         if log_count > 5:
+    #             print(f"  • ... and {log_count - 5} more files")
         
-        if log_count == 0:
-            print(f"Error: No log files found in {self.logs_path}")
-            return False
+    #     if log_count == 0:
+    #         print(f"Error: No log files found in {self.logs_path}")
+    #         return False
             
-        if self.verbose:
-            print(f"Log file count validation passed: {log_count} files found")
+    #     if self.verbose:
+    #         print(f"Log file count validation passed: {log_count} files found")
             
-        return True
+    #     return True
     
-    def get_rank_from_filename(self, filename: str) -> int:
-        """Extract rank number from log filename"""
-        patterns = [
-            r'rank_(\d+)\.log',
-            r'(\d+)\.log',
-            r'log_(\d+)\.txt',
-            r'rank(\d+)\.log'
-        ]
+    # def get_rank_from_filename(self, filename: str) -> int:
+    #     """Extract rank number from log filename"""
+    #     patterns = [
+    #         r'rank_(\d+)\.log',
+    #         r'(\d+)\.log',
+    #         r'log_(\d+)\.txt',
+    #         r'rank(\d+)\.log'
+    #     ]
         
-        for pattern in patterns:
-            match = re.search(pattern, filename)
-            if match:
-                return int(match.group(1))
+    #     for pattern in patterns:
+    #         match = re.search(pattern, filename)
+    #         if match:
+    #             return int(match.group(1))
         
-        # If no pattern matches, try to extract any number
-        numbers = re.findall(r'\d+', filename)
-        if numbers:
-            return int(numbers[0])
+    #     # If no pattern matches, try to extract any number
+    #     numbers = re.findall(r'\d+', filename)
+    #     if numbers:
+    #         return int(numbers[0])
             
-        return -1
+    #     return -1
+
+    # def _extract_save_count(self, line: str) -> Optional[int]:
+    #     match = self._save_count_pattern.search(line)
+    #     if not match:
+    #         return None
+    #     try:
+    #         return int(match.group(1))
+    #     except (TypeError, ValueError):
+    #         return None
+
+    # def _read_full_file(self, filepath: str) -> Tuple[List[str], bool]:
+    #     lines: List[str] = []
+    #     try:
+    #         suffix = filepath.suffix.lower()
+    #         if suffix == '.gz':
+    #             with gzip.open(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
+    #                 lines = f.readlines()
+    #         elif suffix == '.bz2':
+    #             with bz2.open(filepath, 'rt', encoding='utf-8', errors='ignore') as f:
+    #                 lines = f.readlines()
+    #         else:
+    #             with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+    #                 lines = f.readlines()
+    #         lines = [line.rstrip('\n\r') for line in lines]
+    #     except Exception as e:
+    #         if self.verbose:
+    #             print(f"Error reading file {filepath}: {e}")
+    #         return [], False
+    #     return lines, False
+
+    # def _read_recent_savecount_lines(self, filepath: Path, max_groups: int) -> Tuple[List[str], bool]:
+    #     if max_groups <= 0:
+    #         return self._read_full_file(filepath)
+
+    #     suffix = filepath.suffix.lower()
+    #     if suffix in {'.gz', '.bz2'}:
+    #         return self._read_full_file(filepath)
+
+    #     chunk_size = 4096
+    #     collected: List[str] = []
+    #     save_counts_order: List[int] = []
+    #     save_counts_set: Set[int] = set()
+    #     stop_reading = False
+
+    #     try:
+    #         with open(filepath, 'rb') as f:
+    #             position = f.seek(0, os.SEEK_END)
+    #             remainder = b''
+
+    #             while position > 0 and not stop_reading:
+    #                 read_size = min(chunk_size, position)
+    #                 position -= read_size
+    #                 f.seek(position)
+    #                 chunk = f.read(read_size)
+    #                 if not chunk:
+    #                     break
+
+    #                 data = chunk + remainder
+    #                 parts = data.split(b'\n')
+    #                 remainder = parts[0]
+
+    #                 for part in reversed(parts[1:]):
+    #                     if not part and not save_counts_order:
+    #                         continue
+    #                     line = part.decode('utf-8', errors='ignore').rstrip('\n\r')
+    #                     if not line:
+    #                         continue
+    #                     save_count = self._extract_save_count(line)
+    #                     if save_count is None:
+    #                         continue
+    #                     if save_count in save_counts_set:
+    #                         collected.append(line)
+    #                         continue
+    #                     if len(save_counts_order) < max_groups:
+    #                         save_counts_order.append(save_count)
+    #                         save_counts_set.add(save_count)
+    #                         collected.append(line)
+    #                         continue
+    #                     stop_reading = True
+    #                     break
+
+    #             if not stop_reading and remainder:
+    #                 line = remainder.decode('utf-8', errors='ignore').rstrip('\n\r')
+    #                 if line:
+    #                     save_count = self._extract_save_count(line)
+    #                     if save_count is not None and (save_count in save_counts_set or len(save_counts_order) < max_groups):
+    #                         if save_count not in save_counts_set:
+    #                             save_counts_order.append(save_count)
+    #                             save_counts_set.add(save_count)
+    #                         collected.append(line)
+
+    #     except Exception as e:
+    #         if self.verbose:
+    #             print(f"Error partially reading file {filepath}: {e}")
+    #         return self._read_full_file(filepath)
+
+    #     collected.reverse()
+    #     return collected, True
+
+    # def _read_log_lines(self, filepath: Path) -> Tuple[List[str], bool]:
+    #     effective_groups = self.max_save_count_groups
+    #     if effective_groups is None or effective_groups <= 0:
+    #         return self._read_full_file(filepath)
+    #     lines, used_partial = self._read_recent_savecount_lines(filepath, effective_groups)
+    #     if used_partial:
+    #         return lines, True
+    #     return lines, False
     
-    def parse_log_file(self, filepath: str) -> List[GroupHashOp]:
-        """Parse a single log file and extract communication operations with groupHash"""
-        operations = []
-        rank = self.get_rank_from_filename(os.path.basename(filepath))
-        
-        if rank == -1:
+    # def parse_log_file(self, filepath: str) -> List[GroupHashOp]:
+    #     """Parse a single log file and extract communication operations with groupHash"""
+    #     operations: List[GroupHashOp] = []
+    #     rank = self.get_rank_from_filename(os.path.basename(filepath))
+
+    #     if rank == -1:
+    #         if self.verbose:
+    #             print(f"Warning: Could not extract rank from filename: {filepath}")
+    #         return operations
+
+    #     lines, used_partial = self._read_log_lines(Path(filepath))
+    #     op_count = 0
+    #     for line in lines:
+    #         op = self.parse_log_line(line, default_rank=rank)
+    #         if op:
+    #             operations.append(op)
+    #             op_count += 1
+
+    #     if self.verbose:
+    #         mode = "partial" if used_partial else "full"
+    #         print(
+    #             f"  Rank {rank}: Parsed {op_count} operations with groupHash ({mode} read, {len(lines)} lines considered)"
+    #         )
+
+    #     return operations
+
+    # def parse_log_line(self, line: str, default_rank: Optional[int] = None) -> Optional[GroupHashOp]:
+    #     """Parse a single log line into GroupHashOp; extracts rank from line if present."""
+    #     match = re.search(r'\[save_count \d+\] \[([\d.]+)\] \[Rank \d+\] Fun (\w+) Data (\d+) stream ([^\s]+) opCount (\d+)(?: groupHash (-?\d+))?', line)
+    #     if match:
+    #         timestamp = float(match.group(1))
+    #         function = match.group(2)
+    #         data_size = int(match.group(3))
+    #         stream = match.group(4)
+    #         op_count_val = int(match.group(5))
+    #         group_hash = match.group(6) if match.group(6) else None
+    #         # 尝试从行中提取 rank，否则使用 default_rank
+    #         rank_match = re.search(r'\[Rank (\d+)\]', line)
+    #         rank_val = int(rank_match.group(1)) if rank_match else (default_rank if default_rank is not None else -1)
+    #         if group_hash and rank_val != -1:
+    #             return GroupHashOp(
+    #                 rank=rank_val,
+    #                 stream=stream,
+    #                 op_count=op_count_val,
+    #                 function=function,
+    #                 timestamp=timestamp,
+    #                 group_hash=group_hash,
+    #                 data_size=data_size
+    #             )
+    #     return None
+
+
+    
+    # def parse_log_file_worker(self, filepath: str) -> List[GroupHashOp]:
+    #     """Worker function for multiprocessing log parsing"""
+
+    #     return self.parse_log_file(filepath)
+    
+    def parse_all_logs(self, log_entries: Dict[int, List[LogEntry]]) -> Dict[str, List[GroupHashOp]]:
+        """
+        Convert already parsed `LogEntry` objects into `GroupHashOp` groups keyed by groupHash.
+        """
+        self.operations_by_group.clear()
+        if not log_entries:
             if self.verbose:
-                print(f"Warning: Could not extract rank from filename: {filepath}")
-            return operations
-        
-        try:
-            line_count = 0
-            op_count = 0
-            
-            with open(filepath, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line_count += 1
-                    # Parse log line to extract operation data
-                    # Format: [save_count X] [timestamp] [Rank N] Fun FunctionName Data X stream 0x... opCount N groupHash X
-                    match = re.search(r'\[save_count \d+\] \[([\d.]+)\] \[Rank \d+\] Fun (\w+) Data (\d+) stream ([^\s]+) opCount (\d+)(?: groupHash (-?\d+))?', line)
-                    if match:
-                        timestamp = float(match.group(1))
-                        function = match.group(2)
-                        data_size = int(match.group(3))
-                        stream = match.group(4)
-                        op_count_val = int(match.group(5))
-                        group_hash = match.group(6) if match.group(6) else None
-                        
-                        if group_hash:  # Only process operations with groupHash
-                            op = GroupHashOp(
-                                rank=rank,
-                                stream=stream,
-                                op_count=op_count_val,
-                                function=function,
-                                timestamp=timestamp,
-                                group_hash=group_hash,
-                                data_size=data_size
-                            )
-                            operations.append(op)
-                            op_count += 1
-                        
-            if self.verbose:
-                print(f"  Rank {rank}: Parsed {op_count} operations with groupHash from {line_count} lines")
-                        
-        except Exception as e:
-            if self.verbose:
-                print(f"Error parsing {filepath}: {e}")
-                
-        return operations
-    
-    def parse_log_file_worker(self, filepath: str) -> List[GroupHashOp]:
-        """Worker function for multiprocessing log parsing"""
-        return self.parse_log_file(filepath)
-    
-    def parse_all_logs(self) -> Dict[str, List[GroupHashOp]]:
-        """Parse all log files and group operations by groupHash"""
-        if not self.check_log_files():
+                print("No log entries provided to parse_all_logs")
             return {}
-        
-        log_files = glob.glob(os.path.join(self.logs_path, "*.log"))
-        
-        if self.use_multiprocessing and len(log_files) > 1:
-            if self.verbose:
-                print(f"Using multiprocessing to parse {len(log_files)} log files...")
-            
-            operations_by_rank = {}
-            
-            with ProcessPoolExecutor(max_workers=min(len(log_files), mp.cpu_count())) as executor:
-                future_to_file = {executor.submit(self.parse_log_file_worker, filepath): filepath 
-                                for filepath in log_files}
-                
-                for future in as_completed(future_to_file):
-                    filepath = future_to_file[future]
-                    try:
-                        operations = future.result()
-                        rank = self.get_rank_from_filename(os.path.basename(filepath))
-                        if rank != -1:
-                            operations_by_rank[rank] = operations
-                    except Exception as e:
-                        if self.verbose:
-                            print(f"Error processing {filepath}: {e}")
-        else:
-            if self.verbose:
-                print(f"Parsing {len(log_files)} log files sequentially...")
-            
-            operations_by_rank = {}
-            for filepath in log_files:
-                operations = self.parse_log_file(filepath)
-                rank = self.get_rank_from_filename(os.path.basename(filepath))
-                if rank != -1:
-                    operations_by_rank[rank] = operations
-        
-        # Group operations by groupHash
-        for rank, operations in operations_by_rank.items():
-            for op in operations:
-                self.operations_by_group[op.group_hash].append(op)
-        
+
+        for rank, entries in log_entries.items():
+            for entry in entries:
+                if not entry.group_hash:
+                    continue  # Skip entries without groupHash identifiers
+                op = GroupHashOp(
+                    rank=rank,
+                    stream=entry.stream,
+                    op_count=entry.op_count,
+                    function=entry.function,
+                    timestamp=entry.timestamp,
+                    group_hash=entry.group_hash,
+                    data_size=entry.data_size,
+                )
+                self.operations_by_group[entry.group_hash].append(op)
+
         if self.verbose:
             print(f"Grouped operations into {len(self.operations_by_group)} communication groups")
             for group_hash, ops in self.operations_by_group.items():
-                ranks_in_group = sorted(set(op.rank for op in ops))
+                ranks_in_group = sorted({op.rank for op in ops})
                 print(f"  Group {group_hash}: {len(ops)} operations, ranks {ranks_in_group}")
-        
+
         return self.operations_by_group
+
     
     def analyze_group_performance(self) -> Dict[str, GroupPerformance]:
         """Analyze performance for each communication group"""
@@ -227,11 +336,12 @@ class GroupHashSlowDetector:
         if self.verbose:
             print("Analyzing performance for each communication group...")
         
-        # Create sequential group IDs for display
+
         unique_groups = sorted(self.operations_by_group.keys())
+
         for i, group_hash in enumerate(unique_groups):
             self.group_mapping[group_hash] = i + 1
-        
+        # print("3333333333333333333333333333333333")
         for group_hash, operations in self.operations_by_group.items():
             if len(operations) < 2:
                 continue  # Need at least 2 operations to compare
@@ -241,9 +351,10 @@ class GroupHashSlowDetector:
             for op in operations:
                 # Group by function + op_count combination
                 op_key = (op.function, op.op_count)
-                op_groups[op_key].append((op.rank, op.timestamp))
+                op_groups[op_key].append((op.rank, op.timestamp, op.data_size))
             
             # For each operation group, find the slowest rank
+            # print("################内部循环################")
             for op_key, rank_timestamps in op_groups.items():
                 if len(rank_timestamps) < 2:
                     continue  # Need at least 2 ranks for comparison
@@ -265,7 +376,7 @@ class GroupHashSlowDetector:
                     ranks=ranks,
                     timestamps=timestamps,
                     functions=[function_name],
-                    data_sizes=[op.data_size for op in operations if op.function == function_name and op.op_count == op_count],
+                    data_sizes=[rt[2] for rt in rank_timestamps],
                     slowest_rank=slowest_rank,
                     slowest_time=slowest_time,
                     is_outlier=True,  # Always mark as outlier since we're finding the slowest
@@ -286,7 +397,6 @@ class GroupHashSlowDetector:
                 if group_id not in self.rank_slow_counts[slowest_rank]:
                     self.rank_slow_counts[slowest_rank][group_id] = 0
                 self.rank_slow_counts[slowest_rank][group_id] += 1
-        
         if self.verbose:
             print(f"Performance analysis completed for {len(self.group_performance)} groups")
         
@@ -345,6 +455,7 @@ class GroupHashSlowDetector:
     
     def print_slow_rank_summary(self):
         """Print a summary of slow rank analysis"""
+        # print("开始print_slow_rank_summary, group_performance: ")
         if not self.group_performance:
             print("No performance data found. Please analyze performance first.")
             return
@@ -404,7 +515,7 @@ class GroupHashSlowDetector:
         print("="*80)
     
     def print_parallel_style_summary(self):
-        """Print summary in parallel slow node analysis style"""
+        """Print summary in parallel slow node analysis style"""    
         if not self.group_performance:
             print("No performance data found. Please analyze performance first.")
             return
@@ -429,8 +540,11 @@ class GroupHashSlowDetector:
             slow_counts_by_group = {}
             total_slow_count = 0
             
-            for group_hash, group_perf in self.group_performance.items():
-                group_id = self.group_mapping[group_hash]
+            for _, group_perf in self.group_performance.items():
+                group_hash = group_perf.group_hash
+                group_id = self.group_mapping.get(group_hash)
+                if group_id is None:
+                    continue
                 slow_count = self.rank_slow_counts[rank].get(group_id, 0)
                 slow_counts_by_group[group_id] = slow_count
                 total_slow_count += slow_count
@@ -469,7 +583,8 @@ class GroupHashSlowDetector:
         for rank in all_ranks:
             # Calculate total slow time for this rank
             total_slow_time = 0.0
-            for group_hash, group_perf in self.group_performance.items():
+            for _, group_perf in self.group_performance.items():
+                group_hash = group_perf.group_hash
                 if rank in group_perf.ranks:
                     # Find the slowest time in this group
                     group_slowest_time = group_perf.slowest_time
@@ -488,6 +603,7 @@ class GroupHashSlowDetector:
     
     def run_analysis(self):
         """Run complete analysis pipeline"""
+        # print("开始run_analysis, logs_path: ")
         print("Starting Group Hash based slow rank analysis...")
         
         # Parse logs

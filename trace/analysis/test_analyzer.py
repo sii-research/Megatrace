@@ -12,6 +12,10 @@ import sys
 import os
 import yaml
 
+from typing import Optional
+
+from log_reader import LogReader
+
 # Ensure module import from current directory (so `from analysis import ...` uses analysis.py)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -19,9 +23,29 @@ from analysis import DistributedLogAnalyzer  # noqa: E402
 from group_hash_slow_detector import GroupHashSlowDetector  # noqa: E402
 
 
-def run_hang(analyzer: DistributedLogAnalyzer, verbose: bool) -> bool:
-    analyzer.discover_log_files()
-    rank_entries = analyzer.parse_log_files()
+def load_rank_entries(analyzer: DistributedLogAnalyzer, log_path: Optional[str], verbose: bool,max_save_count_groups: int = 2):
+    # if not analyzer.log_path:
+    #     print("No log path specified!")
+    #     return {}
+    reader = LogReader(
+        log_path=str(log_path),
+        max_save_count_groups=max_save_count_groups,
+        logger=analyzer.logger,
+    )
+    log_files = reader.discover_log_files()
+    if not log_files:
+        print("No log files found or parsing failed!")
+        return {}
+    if verbose:
+        print(f"[DEBUG] Discovered {len(log_files)} log files under {log_path}")
+    rank_entries = reader.parse_log_files()
+    if verbose:
+        total_lines = sum(len(entries) for entries in rank_entries.values())
+        print(f"[DEBUG] Parsed {len(rank_entries)} ranks, total {total_lines} lines")
+    return rank_entries
+
+
+def run_hang(analyzer: DistributedLogAnalyzer, rank_entries, verbose: bool) -> bool:
     if not rank_entries:
         print("No log data found or parsing failed!")
         return False
@@ -33,7 +57,8 @@ def run_hang(analyzer: DistributedLogAnalyzer, verbose: bool) -> bool:
     print("\n" + "=" * 60)
     print("Distributed Training Log Analyzer - Hang Detection")
     print("=" * 60)
-    print(f"Testing log path: {analyzer.log_path}/")
+    log_root = str(analyzer.log_path) if analyzer.log_path else "<unknown>"
+    print(f"Testing log path: {log_root}/")
 
     print("\n" + "=" * 60)
     print("Analysis Summary:")
@@ -90,12 +115,28 @@ def run_hang(analyzer: DistributedLogAnalyzer, verbose: bool) -> bool:
     return True
 
 
-def run_slow(analyzer: DistributedLogAnalyzer, logs_path: str, verbose: bool, config_path: str) -> bool:
-    analyzer.discover_log_files()
-    rank_entries = analyzer.parse_log_files()
+def run_slow(analyzer: DistributedLogAnalyzer, rank_entries, verbose: bool, config_path: str) -> bool:
     if not rank_entries:
         print("No log data found or parsing failed!")
         return False
+
+    if verbose:
+        # Debug helper: show save_count statistics from the loaded entries
+        all_entries = []
+        for entries in rank_entries.values():
+            all_entries.extend(entries)
+        unique_save_counts = sorted({entry.save_count for entry in all_entries}, reverse=True)
+        top_save_counts = unique_save_counts[:2]
+        if top_save_counts:
+            print("\n[DEBUG] Top save_count values detected:", top_save_counts)
+            for sc in top_save_counts:
+                print(f"[DEBUG] Sample log lines for save_count {sc}:")
+                sample_lines = [entry.raw_line for entry in all_entries if entry.save_count == sc][:5]
+                if not sample_lines:
+                    print("  (no lines captured)")
+                else:
+                    for line in sample_lines:
+                        print(f"  {line}")
 
     # Only analyze the last save_count group per rank; cross-group patterns are not meaningful
     last_group_entries = analyzer.get_last_save_count_group(rank_entries)
@@ -268,11 +309,9 @@ def run_slow(analyzer: DistributedLogAnalyzer, logs_path: str, verbose: bool, co
     print("\n" + "=" * 80)
     print("GROUP HASH BASED SLOW DETECTION ANALYSIS")
     print("=" * 80)
-    
     try:
         # Initialize GroupHash detector
         grouphash_detector = GroupHashSlowDetector(
-            logs_path=logs_path,
             verbose=verbose,
             use_multiprocessing=True
         )
@@ -280,8 +319,10 @@ def run_slow(analyzer: DistributedLogAnalyzer, logs_path: str, verbose: bool, co
         if verbose:
             print("Running GroupHash-based slow detection analysis...")
         
+
+        # 把这个parse_all_logs（）的操作换成是用给的rank_entries去解析
         # Parse logs and analyze
-        operations_by_group = grouphash_detector.parse_all_logs()
+        operations_by_group = grouphash_detector.parse_all_logs(rank_entries)
         
         if not operations_by_group:
             print("  • No operations with groupHash found in logs")
@@ -359,7 +400,6 @@ def run_slow(analyzer: DistributedLogAnalyzer, logs_path: str, verbose: bool, co
         if verbose:
             import traceback
             traceback.print_exc()
-    
     print("=" * 80)
     return True
 
@@ -381,30 +421,45 @@ def run_parallel_config(analyzer: DistributedLogAnalyzer, verbose: bool, config_
     analyzer.print_3d_parallel_summary(ranks_info, groups.get('tp_groups', []), groups.get('pp_groups', []), groups.get('dp_groups', []))
     return True
 
-
 def main():
     parser = argparse.ArgumentParser(description='Distributed Training Log Analyzer - Unified CLI')
-    parser.add_argument('--log-path', required=True, help='Path to directory containing log files')
+    # parser.add_argument('--log-path', required=False, help='Path to directory containing log files')
     parser.add_argument('--test-type', choices=['hang', 'slow', 'parallel', 'all'], default='all', help='Type of analysis to perform')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output with detailed progress')
     parser.add_argument('--config-path', default='config.yaml', help='Path to parallel analysis config (default: config.yaml)')
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument('--log-path', help='Path to directory containing log files')
+    group.add_argument('--es', action='store_true', help='logs from elasticsearch')
     args = parser.parse_args()
     
-    if not os.path.exists(args.log_path):
-        print(f"Error: Log path '{args.log_path}' does not exist!")
+    if args.log_path:
+        print(f"Using log path: {args.log_path}")
+    elif args.es:
+        print("Using elasticsearch")
+    else:
+        print("No log path or elasticsearch specified")
         return
-    
-    analyzer = DistributedLogAnalyzer(args.log_path, verbose=args.verbose)
+
+    analyzer = DistributedLogAnalyzer(verbose=args.verbose)
+    rank_entries = None
+    if args.log_path:
+        rank_entries = load_rank_entries(analyzer, args.log_path, args.verbose)
+
+    if args.es:
+        # 假装这里有es中读取到的数据
+        rank_entries = None
+
+
     ok = True
     if args.test_type == 'hang':
-        ok = run_hang(analyzer, args.verbose)
+        ok = run_hang(analyzer, rank_entries, args.verbose)
     elif args.test_type == 'slow':
-        ok = run_slow(analyzer, args.log_path, args.verbose, args.config_path)
+        ok = run_slow(analyzer, rank_entries, args.verbose, args.config_path)
     elif args.test_type == 'parallel':
         ok = run_parallel_config(analyzer, args.verbose, args.config_path)
     else:
-        ok = run_hang(analyzer, args.verbose)
-        ok = run_slow(analyzer, args.log_path, args.verbose, args.config_path) and ok
+        ok = run_hang(analyzer, rank_entries, args.verbose)
+        ok = run_slow(analyzer, rank_entries, args.verbose, args.config_path) and ok
         ok = run_parallel_config(analyzer, args.verbose, args.config_path) and ok
     print("\nAnalysis completed successfully!" if ok else "\nAnalysis failed!")
 

@@ -320,8 +320,6 @@ def run_slow(analyzer: DistributedLogAnalyzer, rank_entries, verbose: bool, conf
             print("Running GroupHash-based slow detection analysis...")
         
 
-        # 把这个parse_all_logs（）的操作换成是用给的rank_entries去解析
-        # Parse logs and analyze
         operations_by_group = grouphash_detector.parse_all_logs(rank_entries)
         
         if not operations_by_group:
@@ -446,7 +444,6 @@ def main():
         rank_entries = load_rank_entries(analyzer, args.log_path, args.verbose)
 
     if args.es:
-        # 假装这里有es中读取到的数据
         rank_entries = None
 
 

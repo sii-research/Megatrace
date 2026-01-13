@@ -55,8 +55,16 @@ static inline void get_timestamp(char* buffer, size_t size) {
 
 // Get rank from environment
 static inline const char* get_rank_str() {
-    const char* rank = getenv("OMPI_COMM_WORLD_RANK");
-    return rank ? rank : "0";
+    // 获取rank号，支持torchrun的RANK和MPI的OMPI_COMM_WORLD_RANK
+    const char *rank_str = getenv("OMPI_COMM_WORLD_RANK");
+    if (rank_str == NULL) {
+        rank_str = getenv("RANK");
+    }
+    if (rank_str == NULL) {
+        printf("Environment variable 'OMPI_COMM_WORLD_RANK' or 'RANK' not found.\n");
+        return "0";
+    }
+    return rank_str;
 }
 
 // Core logging function

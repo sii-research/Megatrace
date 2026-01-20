@@ -221,35 +221,28 @@ FuncPtrType resolve_symbol(const char* symbol_name) {
         "libtorch_python.so",
         "libtorch_python.so.1",
         "libtorch_python.so.2",
-        nullptr
-    };
-    
-    for (int i = 0; torch_libs[i] != nullptr; i++) {
-        void* handle = dlopen(torch_libs[i], RTLD_LAZY | RTLD_NOLOAD);
-        if (handle != nullptr) {
-            sym = dlsym(handle, symbol_name);
-            if (sym != nullptr) {
-                // Found it! Don't close handle - we need to keep it open
-                return reinterpret_cast<FuncPtrType>(sym);
-            }
-            dlclose(handle);
-        }
-        dlerror(); // Clear error
-    }
-    
-    // Try common NCCL library paths
-    const char* nccl_libs[] = {
-        "libnccl.so",
+        // 系统 NCCL 库
         "libnccl.so.2",
         "libnccl.so.3",
+        "libnccl.so",
         nullptr
     };
     
-    for (int i = 0; nccl_libs[i] != nullptr; i++) {
-        void* handle = dlopen(nccl_libs[i], RTLD_LAZY | RTLD_NOLOAD);
+    // printf("[MEGATRACE] 使用 dlopen 方式查找符号: %s\n", symbol_name);
+    for (int i = 0; search_libs[i] != nullptr; i++) {
+        // 先尝试在已加载的库中查找（RTLD_NOLOAD）
+        void* handle = dlopen(search_libs[i], RTLD_LAZY | RTLD_NOLOAD);
+        if (handle == nullptr) {
+            // 如果库未加载，尝试加载它
+            // printf("[MEGATRACE] 尝试加载库: %s\n", search_libs[i]);
+            handle = dlopen(search_libs[i], RTLD_LAZY);
+        } else {
+            // printf("[MEGATRACE] 在已加载的库中查找: %s\n", search_libs[i]);
+        }
         if (handle != nullptr) {
             sym = dlsym(handle, symbol_name);
             if (sym != nullptr) {
+                // printf("[MEGATRACE] 使用 dlopen 方式在库 %s 中成功找到符号: %s\n", search_libs[i], symbol_name);
                 // Found it! Don't close handle - we need to keep it open
                 return reinterpret_cast<FuncPtrType>(sym);
             }
@@ -258,21 +251,9 @@ FuncPtrType resolve_symbol(const char* symbol_name) {
         dlerror(); // Clear error
     }
     
-    // As last resort, try RTLD_DEFAULT but verify it's not our own function
-    sym = dlsym(RTLD_DEFAULT, symbol_name);
-    if (sym != nullptr) {
-        Dl_info info;
-        if (dladdr(sym, &info) != 0 && info.dli_fname != nullptr) {
-            // Check if it's NOT our own library to avoid infinite recursion
-            const char* our_lib = "nccl_intercept.so";
-            if (strstr(info.dli_fname, our_lib) == nullptr) {
-                // It's from a different library, safe to use
-                return reinterpret_cast<FuncPtrType>(sym);
-            }
-        }
-    }
-    
-    // Symbol not found or found in our own library
+    // 所有方式都失败，返回 nullptr
+    // 此时拦截函数会记录错误并返回 ncclSystemError
+    // printf("[MEGATRACE] 所有方式都失败，无法找到符号: %s\n", symbol_name);
     return nullptr;
 }
 

@@ -267,8 +267,7 @@ extern "C" ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
         if (!real_ncclGetUniqueId) {
             real_ncclGetUniqueId = resolve_symbol<ncclGetUniqueId_t>("ncclGetUniqueId");
             if (!real_ncclGetUniqueId) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclGetUniqueId: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclGetUniqueId");
                 return ncclSystemError;
             }
         }
@@ -323,8 +322,7 @@ extern "C" ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncc
         if (!real_ncclCommInitRankConfig) {
             real_ncclCommInitRankConfig = resolve_symbol<ncclCommInitRankConfig_t>("ncclCommInitRankConfig");
             if (!real_ncclCommInitRankConfig) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclCommInitRankConfig: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclCommInitRankConfig");
                 return ncclSystemError;
             }
         }
@@ -365,8 +363,7 @@ extern "C" ncclResult_t ncclCommInitAll(ncclComm_t* comm, int ndev, const int* d
         if (!real_ncclCommInitAll) {
             real_ncclCommInitAll = resolve_symbol<ncclCommInitAll_t>("ncclCommInitAll");
             if (!real_ncclCommInitAll) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclCommInitAll: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclCommInitAll");
                 return ncclSystemError;
             }
         }
@@ -411,8 +408,7 @@ extern "C" ncclResult_t ncclAllReduce(const void* sendbuff, void* recvbuff, size
         if (!real_ncclAllReduce) {
             real_ncclAllReduce = resolve_symbol<ncclAllReduce_t>("ncclAllReduce");
             if (!real_ncclAllReduce) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclAllReduce: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclAllReduce");
                 return ncclSystemError;
             }
         }
@@ -447,8 +443,7 @@ extern "C" ncclResult_t ncclReduceScatter(const void* sendbuff, void* recvbuff, 
         if (!real_ncclReduceScatter) {
             real_ncclReduceScatter = resolve_symbol<ncclReduceScatter_t>("ncclReduceScatter");
             if (!real_ncclReduceScatter) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclReduceScatter: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclReduceScatter");
                 return ncclSystemError;
             }
         }
@@ -482,7 +477,6 @@ extern "C" ncclResult_t ncclAllGather(const void* sendbuff, void* recvbuff, size
         if (!real_ncclAllGather) {
             real_ncclAllGather = resolve_symbol<ncclAllGather_t>("ncclAllGather");
             if (!real_ncclAllGather) {
-                const char* err = dlerror();
                 LOG_ERROR("Cannot find symbol ncclAllGather: %s", err ? err : "unknown error");
                 return ncclSystemError;
             }
@@ -517,8 +511,7 @@ extern "C" ncclResult_t ncclSendRecv(const void* sendbuff, size_t sendcount, ncc
         if (!real_ncclSendRecv) {
             real_ncclSendRecv = resolve_symbol<ncclSendRecv_t>("ncclSendRecv");
             if (!real_ncclSendRecv) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclSendRecv: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclSendRecv");
                 return ncclSystemError;
             }
         }
@@ -551,8 +544,7 @@ extern "C" ncclResult_t ncclSend(const void* sendbuff, size_t count, ncclDataTyp
         if (!real_ncclSend) {
             real_ncclSend = resolve_symbol<ncclSend_t>("ncclSend");
             if (!real_ncclSend) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclSend: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclSend");
                 return ncclSystemError;
             }
         }
@@ -585,8 +577,7 @@ extern "C" ncclResult_t ncclRecv(void* recvbuff, size_t count, ncclDataType_t da
         if (!real_ncclRecv) {
             real_ncclRecv = resolve_symbol<ncclRecv_t>("ncclRecv");
             if (!real_ncclRecv) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclRecv: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclRecv");
                 return ncclSystemError;
             }
         }
@@ -619,8 +610,7 @@ extern "C" ncclResult_t ncclReduce(const void* sendbuff, void* recvbuff, size_t 
         if (!real_ncclReduce) {
             real_ncclReduce = resolve_symbol<ncclReduce_t>("ncclReduce");
             if (!real_ncclReduce) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclReduce: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclReduce");
                 return ncclSystemError;
             }
         }
@@ -654,8 +644,7 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
         if (!real_ncclBroadcast) {
             real_ncclBroadcast = resolve_symbol<ncclBroadcast_t>("ncclBroadcast");
             if (!real_ncclBroadcast) {
-                const char* err = dlerror();
-                LOG_ERROR("Cannot find symbol ncclBroadcast: %s", err ? err : "unknown error");
+                LOG_ERROR("Cannot find symbol ncclBroadcast");
                 return ncclSystemError;
             }
         }

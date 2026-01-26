@@ -1,4 +1,4 @@
-#ifdef MEGATRACE_GPU_NVIDIA
+#ifdef MEGATRACE_GPU_AMD
 
 #include "intercept_common.h"
 #include "intercept.h"
@@ -12,6 +12,8 @@
 #include <stack>
 
 // Define function pointer variables declared in intercept.h
+// Note: RCCL may use different function names or maintain NCCL compatibility
+// We'll try both naming conventions
 ncclReduce_t real_ncclReduce = NULL;
 ncclBroadcast_t real_ncclBroadcast = NULL;
 ncclAllReduce_t real_ncclAllReduce = NULL;
@@ -28,14 +30,14 @@ ncclGetUniqueId_t real_ncclGetUniqueId = NULL;
 // Mutex for thread-safe dlsym operations
 static std::mutex dlsym_mutex;
 
-// Custom hash and equality functions for NCCL
-struct NcclUniqueIdHash {
+// Custom hash and equality functions for RCCL (using ncclUniqueId type for compatibility)
+struct RcclUniqueIdHash {
     std::size_t operator()(const ncclUniqueId& id) const {
         return static_cast<std::size_t>(hashUniqueId(&id, sizeof(ncclUniqueId)));
     }
 };
 
-struct NcclUniqueIdEqual {
+struct RcclUniqueIdEqual {
     bool operator()(const ncclUniqueId& lhs, const ncclUniqueId& rhs) const {
         return memcmp(&lhs, &rhs, sizeof(ncclUniqueId)) == 0;
     }
@@ -43,7 +45,7 @@ struct NcclUniqueIdEqual {
 
 // Global mapping tables using custom hash/equality
 static std::mutex g_comm_mapping_mutex;
-static std::unordered_map<ncclUniqueId, ncclComm_t, NcclUniqueIdHash, NcclUniqueIdEqual> g_comm_id_to_comm;
+static std::unordered_map<ncclUniqueId, ncclComm_t, RcclUniqueIdHash, RcclUniqueIdEqual> g_comm_id_to_comm;
 static std::unordered_map<ncclComm_t, ncclUniqueId, std::hash<void*>, std::equal_to<void*>> g_comm_to_comm_id;
 // Use thread-local stack to support repeated calls
 static thread_local std::stack<ncclUniqueId> g_unique_id_stack;
@@ -96,25 +98,45 @@ uint64_t getGroupHash(ncclComm_t comm) {
 
 // Helper function to resolve symbols with multiple strategies
 // Tries RTLD_NEXT first, then searches in PyTorch libraries
+// RCCL may use nccl* function names for compatibility or rccl* names
 template<typename FuncPtrType>
 FuncPtrType resolve_symbol(const char* symbol_name) {
-    // NCCL-specific library search list
+    // RCCL-specific library search list
     const char* torch_libs[] = {
-        "libtorch_cuda.so",
-        "libtorch_cuda.so.1",
-        "libtorch_cuda.so.2",
+        "libtorch_hip.so",
+        "libtorch_hip.so.1",
+        "libtorch_hip.so.2",
         "libtorch_python.so",
         "libtorch_python.so.1",
         "libtorch_python.so.2",
-        "libnccl.so.2",
-        "libnccl.so.3",
-        "libnccl.so",
+        "librccl.so.2",
+        "librccl.so.3",
+        "librccl.so",
         nullptr
     };
-    return resolve_symbol_common<FuncPtrType>(symbol_name, torch_libs);
+    
+    // First try with original symbol name (RCCL may maintain NCCL compatibility)
+    FuncPtrType result = resolve_symbol_common<FuncPtrType>(symbol_name, torch_libs);
+    if (result != nullptr) {
+        return result;
+    }
+    
+    // If not found, try with rccl prefix (if RCCL uses different naming)
+    // For example: ncclAllReduce -> rcclAllReduce
+    if (strncmp(symbol_name, "nccl", 4) == 0) {
+        char rccl_name[256];
+        snprintf(rccl_name, sizeof(rccl_name), "rccl%s", symbol_name + 4);
+        result = resolve_symbol_common<FuncPtrType>(rccl_name, torch_libs);
+        if (result != nullptr) {
+            return result;
+        }
+    }
+    
+    return nullptr;
 }
 
 // Intercept ncclGetUniqueId to capture commId
+// RCCL may use ncclGetUniqueId for compatibility or rcclGetUniqueId
 extern "C" ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId) {
     if (!real_ncclGetUniqueId)
     {
@@ -161,7 +183,7 @@ extern "C" ncclResult_t ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqu
             g_comm_to_comm_id[*comm] = commId;
         }
         // If the top stack element matches, pop it to avoid reuse by ncclCommInitAll
-        if (!g_unique_id_stack.empty() && NcclUniqueIdEqual()(g_unique_id_stack.top(), commId)) {
+        if (!g_unique_id_stack.empty() && RcclUniqueIdEqual()(g_unique_id_stack.top(), commId)) {
             g_unique_id_stack.pop();
         }
     }
@@ -193,7 +215,7 @@ extern "C" ncclResult_t ncclCommInitRankConfig(ncclComm_t* comm, int nranks, ncc
             g_comm_to_comm_id[*comm] = commId;
         }
         // If the top stack element matches, pop it to avoid reuse by ncclCommInitAll
-        if (!g_unique_id_stack.empty() && NcclUniqueIdEqual()(g_unique_id_stack.top(), commId)) {
+        if (!g_unique_id_stack.empty() && RcclUniqueIdEqual()(g_unique_id_stack.top(), commId)) {
             g_unique_id_stack.pop();
         }
     }
@@ -483,7 +505,8 @@ extern "C" ncclResult_t ncclBroadcast(const void* sendbuff, void* recvbuff, size
 __attribute__((constructor))
 void megatrace_init() {
     log_init();
-    LOG_INFO("Megatrace NCCL interceptor initialized");
+    LOG_INFO("Megatrace RCCL interceptor initialized");
 }
 
-#endif // MEGATRACE_GPU_NVIDIA
+#endif // MEGATRACE_GPU_AMD
+

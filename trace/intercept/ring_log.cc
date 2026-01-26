@@ -15,8 +15,9 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
 #include <chrono>
+
+
 
 const int nccl_megatrace_enable = getenv("NCCL_MEGATRACE_ENABLE") ? atoi(getenv("NCCL_MEGATRACE_ENABLE")) : 1;
 const char* nccl_megatrace_log_path = getenv("NCCL_MEGATRACE_ENABLE") ? getenv("NCCL_MEGATRACE_LOG_PATH") : "./logs";
@@ -152,20 +153,9 @@ int rotate_log_file(const char *filename) {
     return 0;
 }
 
-// Get PCI bus ID of current CUDA device
+// Get PCI bus ID of current GPU device (vendor-agnostic)
 static void get_pci_bus_id(char* pci_buf, size_t buf_size) {
-    int dev = -1;
-    cudaError_t err = cudaGetDevice(&dev);
-    if (err != cudaSuccess || dev < 0) {
-        snprintf(pci_buf, buf_size, "unknown");
-        return;
-    }
-    
-    err = cudaDeviceGetPCIBusId(pci_buf, buf_size, dev);
-    if (err != cudaSuccess) {
-        snprintf(pci_buf, buf_size, "unknown");
-        return;
-    }
+    megatrace_get_pci_bus_id(pci_buf, buf_size);
 }
 
  /*
@@ -281,7 +271,7 @@ void *log_writer_thread(void *arg) {
     return NULL;
 }
 
-void log_event(struct timespec time_api, size_t count, const char* opName, cudaStream_t stream,int64_t opCount,uint64_t groupHash) {
+void log_event(struct timespec time_api, size_t count, const char* opName, gpu_stream_t stream, int64_t opCount, uint64_t groupHash) {
    
     char log_msg[LOG_MAX_LEN];
     char time_str[64];

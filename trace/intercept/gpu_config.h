@@ -1,6 +1,8 @@
 #ifndef GPU_CONFIG_H
 #define GPU_CONFIG_H
 
+#include <cstdio>
+
 /**
  * GPU Vendor Configuration
  * 

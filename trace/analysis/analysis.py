@@ -5,22 +5,34 @@ Distributed Training Log Analyzer - Analyze all log files in specified path
 Support hang analysis and slow analysis functionality
 """
 
-import os
+import traceback
 import sys
 import argparse
 import logging
-import re
-import gzip
-import bz2
 import yaml
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 import time
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from datetime import datetime
 from dataclasses import dataclass
 import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
+
+# Import modules with fallback for different execution contexts
+try:
+    from trace.analysis.group_hash_slow_detector import GroupHashSlowDetector
+    from trace.analysis.log_reader import LogEntry, LogReader
+except ImportError:
+    # Fallback: import from same directory when running as script
+    try:
+        from group_hash_slow_detector import GroupHashSlowDetector
+        from log_reader import LogEntry, LogReader
+    except ImportError:
+        # Last resort: try relative imports
+        from .group_hash_slow_detector import GroupHashSlowDetector
+        from .log_reader import LogEntry, LogReader
 
 # Import time pattern analyzer
 try:
@@ -28,52 +40,26 @@ try:
 except ImportError:
     TimePatternAnalyzer = None
 
-
-# Define log entry data structure
-class LogEntry:
-    """Single log entry data structure"""
-    def __init__(self, raw_line: str, save_count: int, timestamp: float, 
-                 rank: int, function: str, data_size: int, stream: str, op_count: int, group_hash: str = None):
-        self.raw_line = raw_line
-        self.save_count = save_count
-        self.timestamp = timestamp
-        self.rank = rank
-        self.function = function
-        self.data_size = data_size
-        self.stream = stream
-        self.op_count = op_count
-        self.group_hash = group_hash
-    
-    def __str__(self):
-        if self.group_hash:
-            return f"[save_count {self.save_count}] [{self.timestamp}] [Rank {self.rank}] Fun {self.function} Data {self.data_size} stream {self.stream} opCount {self.op_count} groupHash {self.group_hash}"
-        else:
-            return f"[save_count {self.save_count}] [{self.timestamp}] [Rank {self.rank}] Fun {self.function} Data {self.data_size} stream {self.stream} opCount {self.op_count}"
-
-
 class DistributedLogAnalyzer:
     """Distributed Training Log Analyzer Main Class"""
     
-    def __init__(self, log_path: str, verbose: bool = False):
+    def __init__(self, log_path: str = None,
+                 verbose: bool = False, max_save_count_groups: Optional[int] = 2):
         """
         Initialize Distributed Log Analyzer
         
         Args:
             log_path: Path to log file or directory to analyze
             verbose: Whether to show detailed log output
+            max_save_count_groups: Number of most recent save_count groups to load from local files
+                                   (None or <=0 means load entire file)
         """
-        self.log_path = Path(log_path)
-        self.log_files = []
+        self.log_path = Path(log_path) if log_path else None
         self.analysis_results = {}
         self.verbose = verbose
-        
+        self.max_save_count_groups = max_save_count_groups if (max_save_count_groups is None or max_save_count_groups >= 0) else None
         # Setup logging
         self._setup_logging()
-        
-        # Define regex pattern for log parsing
-        self.log_pattern = re.compile(
-            r'\[save_count (\d+)\] \[([\d.]+)\] \[Rank (\d+)\] Fun (\w+) Data (\d+) stream (0x[0-9a-fA-F]+) opCount (\d+)(?: groupHash (-?\d+))?'
-        )
         
     def _setup_logging(self):
         """Setup logging configuration"""
@@ -104,133 +90,29 @@ class DistributedLogAnalyzer:
                     root_logger.removeHandler(handler)
             root_logger.addHandler(console_handler)
         
-        self.logger = logging.getLogger(__name__)
-        
-    def discover_log_files(self) -> List[Path]:
+        self.logger = logging.getLogger(__name__) 
+
+    def  _get_rank_metadata(self, rank_entries: Dict[int, List[LogEntry]], rank: int) -> Dict[str, str]:
         """
-        1. Traverse log files in folder
+        Get metadata (node_ip, hostname, gpu_pci) for a specific rank.
         
+        Args:
+            rank_entries: Dictionary of rank to log entries
+            rank: Rank number
+            
         Returns:
-            List containing all log file paths
+            Dictionary containing node_ip, hostname, and gpu_pci
         """
-        log_extensions = {'.log', '.txt', '.out', '.err'}
+        if rank not in rank_entries or not rank_entries[rank]:
+            return {'node_ip': 'unknown', 'hostname': 'unknown', 'gpu_pci': 'unknown'}
         
-        if self.log_path.is_file():
-            # If it's a single file
-            if self.log_path.suffix.lower() in log_extensions:
-                self.log_files = [self.log_path]
-                self.logger.info(f"Found single log file: {self.log_path}")
-            else:
-                self.logger.warning(f"File {self.log_path} is not a log file")
-                return []
-        elif self.log_path.is_dir():
-            # If it's a directory, recursively find all log files
-            self.log_files = []
-            for file_path in self.log_path.rglob('*'):
-                if file_path.is_file() and file_path.suffix.lower() in log_extensions:
-                    self.log_files.append(file_path)
-            
-            self.logger.info(f"Found {len(self.log_files)} log files in directory {self.log_path}")
-        else:
-            self.logger.error(f"Path {self.log_path} does not exist")
-            return []
-            
-        return self.log_files
-    
-    def read_log_file(self, file_path: Path) -> List[str]:
-        """Read all lines from log file"""
-        lines = []
-        try:
-            if file_path.suffix.lower() == '.gz':
-                with gzip.open(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            elif file_path.suffix.lower() == '.bz2':
-                with bz2.open(file_path, 'rt', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            else:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-            
-            # Remove newline characters from each line
-            lines = [line.rstrip('\n\r') for line in lines]
-            self.logger.info(f"File {file_path} read completed, total {len(lines)} lines")
-            
-        except Exception as e:
-            self.logger.error(f"Error reading file {file_path}: {e}")
-            return []
-        
-        return lines
-    
-    def parse_log_line(self, line: str) -> Optional[LogEntry]:
-        """Parse single log line"""
-        match = self.log_pattern.match(line)
-        if match:
-            save_count = int(match.group(1))
-            timestamp = float(match.group(2))
-            rank = int(match.group(3))
-            function = match.group(4)
-            data_size = int(match.group(5))
-            stream = match.group(6)
-            op_count = int(match.group(7))
-            group_hash = match.group(8) # Get groupHash if it exists
-            
-            return LogEntry(line, save_count, timestamp, rank, function, data_size, stream, op_count, group_hash)
-        
-        return None
-    
-    def parse_log_files(self) -> Dict[int, List[LogEntry]]:
-        """
-        2. Read logs for each rank and mark rank numbers
-        3. Analyze last save_count group log entries
-        
-        Returns:
-            Log entries organized by rank dictionary
-        """
-        rank_entries = defaultdict(list)
-        
-        for log_file in self.log_files:
-            self.logger.info(f"Starting to parse file: {log_file}")
-            lines = self.read_log_file(log_file)
-            
-            for line in lines:
-                entry = self.parse_log_line(line)
-                if entry:
-                    rank_entries[entry.rank].append(entry)
-        
-        # Sort entries by time for each rank
-        for rank in rank_entries:
-            rank_entries[rank].sort(key=lambda x: x.timestamp)
-        
-        self.logger.info(f"Parsing completed, found logs for {len(rank_entries)} ranks")
-        for rank, entries in rank_entries.items():
-            self.logger.info(f"Rank {rank}: {len(entries)} records")
-        
-        return rank_entries
-    
-    def get_last_save_count_group(self, rank_entries: Dict[int, List[LogEntry]]) -> Dict[int, List[LogEntry]]:
-        """
-        Get last save_count group log entries for each rank
-        
-        Returns:
-            Last save_count group log entries for each rank
-        """
-        last_save_count_entries = {}
-        
-        for rank, entries in rank_entries.items():
-            if not entries:
-                continue
-            
-            # Find maximum save_count
-            max_save_count = max(entry.save_count for entry in entries)
-            
-            # Filter entries from last save_count group
-            last_group = [entry for entry in entries if entry.save_count == max_save_count]
-            
-            if last_group:
-                last_save_count_entries[rank] = last_group
-                self.logger.info(f"Rank {rank} last save_count {max_save_count}: {len(last_group)} records")
-        
-        return last_save_count_entries
+        # Get metadata from the first entry (all entries for the same rank should have same metadata)
+        first_entry = rank_entries[rank][0]
+        return {
+            'node_ip': first_entry.node_ip,
+            'hostname': first_entry.hostname,
+            'gpu_pci': first_entry.gpu_pci
+        }
     
     def group_by_stream(self, rank_entries: Dict[int, List[LogEntry]]) -> Dict[int, Dict[str, List[LogEntry]]]:
         """
@@ -1174,28 +1056,27 @@ class DistributedLogAnalyzer:
         
         print("\n" + "="*60)
     
-    def run(self):
-        """Run complete hang detection analysis"""
-        self.logger.info("=" * 60)
+    def run_hang(self, rank_entries: Dict[int, List[LogEntry]], analyze_opcount: bool = False):
+        """
+        Run complete hang detection analysis on pre-loaded rank entries.
+        
+        Args:
+            rank_entries: Dictionary of rank to log entries
+            analyze_opcount: If True, perform opCount synchronization analysis (default: False)
+        """
+        self.logger.info("=" * 80)
         self.logger.info("Starting Distributed Training Log Hang Detection Analysis")
-        self.logger.info("=" * 60)
+        self.logger.info("=" * 80)
         
         try:
-            # 1. Traverse log files in folder
-            self.discover_log_files()
-            if not self.log_files:
-                self.logger.error("No log files found for analysis")
-            return
-            
-            # 2. Read logs for each rank and mark rank numbers
-            # 3. Analyze last save_count group log entries
-            rank_entries = self.parse_log_files()
             if not rank_entries:
                 self.logger.error("No valid log entries parsed")
                 return
             
             # Get last save_count group entries
-            last_save_count_entries = self.get_last_save_count_group(rank_entries)
+            # NOTE: rank_entries already contains only the max save_count entries, so no need to filter
+            # last_save_count_entries = self.get_last_save_count_group(rank_entries)
+            last_save_count_entries = rank_entries
             
             # 4. Group logs by stream
             stream_groups = self.group_by_stream(last_save_count_entries)
@@ -1207,14 +1088,19 @@ class DistributedLogAnalyzer:
             hangs = self.detect_hangs(last_operations, stream_groups)
             
             # Output analysis results
-            self.logger.info("=" * 60)
+            self.logger.info("=" * 80)
             self.logger.info("Hang Detection Analysis Completed")
-            self.logger.info("=" * 60)
+            self.logger.info("=" * 80)
             
             if hangs:
                 self.logger.info(f"Hang detection completed: found {len(hangs)} potential hang situations")
             else:
                 self.logger.info("No hang situations detected, system running normally")
+            
+            # Perform opCount synchronization analysis if requested
+            opcount_analysis = None
+            if analyze_opcount:
+                opcount_analysis = self._analyze_opcount_synchronization(last_operations, stream_groups)
             
             # Perform time pattern analysis if available
             time_pattern_results = None
@@ -1233,7 +1119,6 @@ class DistributedLogAnalyzer:
                 except Exception as e:
                     self.logger.error(f"Error during time pattern analysis: {e}")
                     if self.verbose:
-                        import traceback
                         traceback.print_exc()
             
             # Save analysis results
@@ -1246,10 +1131,521 @@ class DistributedLogAnalyzer:
                 'time_pattern_analysis': time_pattern_results
             }
             
+            if opcount_analysis:
+                self.analysis_results['opcount_sync_analysis'] = opcount_analysis
+            
+            # Find and output min op count rank (the rank that is stuck/causing hang)
+            min_opcount_rank = self._find_min_opcount_rank_from_last_ops(last_operations)
+            if min_opcount_rank is not None:
+                rank_metadata = self._get_rank_metadata(rank_entries, min_opcount_rank)
+                result = "Min OpCount Rank (Stuck Rank) Information:\n"
+                result += f"Rank: {min_opcount_rank}, PCI: {rank_metadata['gpu_pci']}, \n"
+                result += f"Hostname: {rank_metadata['hostname']}, IP: {rank_metadata['node_ip']}\n"
+                result += ("=" * 80)
+                result += '\n'
+                self.logger.info("")
+                self.logger.info("=" * 80)
+                self.logger.info("Min OpCount Rank (Stuck Rank) Information:")
+                self.logger.info(f"Rank: {min_opcount_rank}, PCI: {rank_metadata['gpu_pci']}")
+                self.logger.info(f"Hostname: {rank_metadata['hostname']}, IP: {rank_metadata['node_ip']}")
+                self.logger.info("=" * 80)
+            
         except Exception as e:
             self.logger.error(f"Error during analysis: {e}")
-            import traceback
             traceback.print_exc()
+            return None
+    
+    def _find_min_opcount_rank_from_last_ops(self, last_operations: Dict[int, Dict[str, LogEntry]]) -> Optional[int]:
+        """
+        Find the rank with minimum op_count from last operations (the rank that is stuck/causing hang).
+        This is a simplified version that finds the minimum op_count across all ranks and streams.
+        
+        Args:
+            last_operations: Last operations by rank and stream
+            
+        Returns:
+            Rank number with minimum op_count, or None if no operations found
+        """
+        if not last_operations:
+            return None
+        
+        # Build opCount map to find unique opCounts
+        opcount_map = {}
+        for rank, sdict in last_operations.items():
+            for stream, op in sdict.items():
+                opcount_map.setdefault(op.op_count, []).append((rank, op.function, stream))
+        
+        # Find unique opCounts (appearing only once)
+        unique_items = [(oc, vals[0]) for oc, vals in sorted(opcount_map.items()) if len(vals) == 1]
+        
+        if unique_items:
+            # Find minimum unique opCount
+            min_oc, (min_rank, _, _) = min(unique_items, key=lambda x: x[0])
+            return min_rank
+        else:
+            # If no unique opCounts, find the minimum opCount overall
+            min_opcount = None
+            min_opcount_rank = None
+            for rank, sdict in last_operations.items():
+                for stream, op in sdict.items():
+                    if min_opcount is None or op.op_count < min_opcount:
+                        min_opcount = op.op_count
+                        min_opcount_rank = rank
+            return min_opcount_rank
+    
+    def _analyze_opcount_synchronization(self, last_operations: Dict[int, Dict[str, LogEntry]], 
+                                        stream_groups: Dict[int, Dict[str, List[LogEntry]]]) -> Dict:
+        """
+        Perform opCount synchronization analysis.
+        
+        Args:
+            last_operations: Last operations by rank and stream
+            stream_groups: Stream groups by rank
+            
+        Returns:
+            Dictionary containing opCount synchronization analysis results
+        """
+        self.logger.info("\n" + "=" * 80)
+        self.logger.info("Summary Analysis - Synchronization Comparison:")
+        self.logger.info("=" * 80)
+        
+        unique_ranks = len(last_operations)
+        total_streams = sum(len(streams) for streams in stream_groups.values())
+        self.logger.info(f"Total Ranks: {unique_ranks}")
+        self.logger.info(f"Total Streams: {total_streams}")
+        
+        # Log last operations by rank and stream
+        self.logger.info("\nLast Operations by Rank and Stream:")
+        for rank in sorted(last_operations.keys()):
+            self.logger.info(f"Rank {rank}:")
+            for stream in sorted(last_operations[rank].keys()):
+                op = last_operations[rank][stream]
+                self.logger.info(f"  Stream {stream}: {op.function} (opCount {op.op_count})")
+        
+        # Build opCount map
+        opcount_map = {}
+        for rank, sdict in last_operations.items():
+            for stream, op in sdict.items():
+                opcount_map.setdefault(op.op_count, []).append((rank, op.function, stream))
+        
+        duplicate_items = [(oc, vals) for oc, vals in sorted(opcount_map.items()) if len(vals) > 1]
+        unique_items = [(oc, vals[0]) for oc, vals in sorted(opcount_map.items()) if len(vals) == 1]
+        
+        opcount_analysis = {
+            'duplicate_opcounts': [],
+            'unique_opcounts': [],
+            'min_unique_opcount': None,
+            'min_unique_rank': None
+        }
+        
+        if duplicate_items:
+            self.logger.info("\nDuplicate opCounts (appearing in multiple ranks):")
+            for oc, vals in duplicate_items:
+                ranks = sorted(r for r, _, _ in vals)
+                self.logger.info(f"  opCount {oc}: Ranks {ranks}")
+                op_type_ranks = {}
+                for r, func, _ in vals:
+                    op_type_ranks.setdefault(func, []).append(r)
+                for func in sorted(op_type_ranks.keys()):
+                    self.logger.info(f"    {func}: Ranks {sorted(set(op_type_ranks[func]))}")
+                
+                opcount_analysis['duplicate_opcounts'].append({
+                    'op_count': oc,
+                    'ranks': ranks,
+                    'functions': {func: sorted(set(rank_list)) for func, rank_list in op_type_ranks.items()}
+                })
+        
+        if unique_items:
+            self.logger.info("\nUnique opCounts (appearing only once):")
+            for oc, (r, _, _) in unique_items:
+                self.logger.info(f"  opCount {oc}: Rank {r}")
+                opcount_analysis['unique_opcounts'].append({
+                    'op_count': oc,
+                    'rank': r
+                })
+            
+            if unique_items:
+                min_oc, (min_rank, _, _) = min(unique_items, key=lambda x: x[0])
+                opcount_analysis['min_unique_opcount'] = min_oc
+                opcount_analysis['min_unique_rank'] = min_rank
+                self.logger.info(f"\nMinimum unique opCount: {min_oc} (Rank {min_rank})")
+                
+                for stream, op in stream_groups[min_rank].items():
+                    lop = last_operations[min_rank].get(stream)
+                    if lop and lop.op_count == min_oc:
+                        self.logger.info(f"\nDetails for Rank {min_rank} (minimum unique opCount):")
+                        self.logger.info(f"  Stream {stream}: {lop.function} (opCount {lop.op_count})")
+                        break
+        
+        return opcount_analysis
+    
+    def run_slow(self, rank_entries: Dict[int, List[LogEntry]], config_path: Optional[str] = None, 
+                 analyze_grouphash: bool = True) -> Dict:
+        """
+        Run slow node detection analysis on pre-loaded rank entries.
+        Only performs GroupHash-based slow detection.
+        
+        Args:
+            rank_entries: Dictionary of rank to log entries
+            config_path: Path to parallel analysis config file (optional, ignored)
+            analyze_grouphash: If True, perform GroupHash-based slow detection (default: True)
+            
+        Returns:
+            Dictionary containing slow analysis results
+        """
+        self.logger.info("=" * 80)
+        self.logger.info("Starting Slow Node Detection Analysis")
+        self.logger.info("=" * 80)
+        
+        try:
+            if not rank_entries:
+                self.logger.error("No valid log entries parsed")
+                return {}
+            
+            # Perform GroupHash-based slow detection
+            grouphash_results = None
+            if analyze_grouphash:
+                grouphash_results = self._analyze_grouphash_slow(rank_entries)
+            
+            # Save analysis results
+            slow_analysis_results = {}
+            
+            if grouphash_results:
+                slow_analysis_results['grouphash_analysis'] = grouphash_results
+            
+            # Store in analysis_results if it exists, otherwise create it
+            if not hasattr(self, 'analysis_results') or not self.analysis_results:
+                self.analysis_results = {}
+            self.analysis_results['slow_analysis'] = slow_analysis_results
+            
+            return slow_analysis_results
+            
+        except Exception as e:
+            self.logger.error(f"Error during slow analysis: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            return {}
+    
+    def _analyze_per_rank_slow(self, last_group_entries: Dict[int, List[LogEntry]]) -> tuple:
+        """Analyze slow ranks using per-rank metrics."""
+        
+        def compute_rank_metrics(rank, entries):
+            if not entries:
+                return rank, None
+            # sort by timestamp
+            sorted_entries = sorted(entries, key=lambda x: x.timestamp)
+            start_ts = sorted_entries[0].timestamp
+            end_ts = sorted_entries[-1].timestamp
+            total_duration = max(0.0, end_ts - start_ts)
+            # intervals
+            intervals = []
+            for i in range(1, len(sorted_entries)):
+                intervals.append(sorted_entries[i].timestamp - sorted_entries[i - 1].timestamp)
+            mean_interval = float(np.mean(intervals)) if intervals else 0.0
+            std_interval = float(np.std(intervals)) if intervals else 0.0
+            max_interval = float(np.max(intervals)) if intervals else 0.0
+            p95_interval = float(np.percentile(intervals, 95)) if intervals else 0.0
+            total_calls = len(sorted_entries)
+            calls_per_second = (total_calls / total_duration) if total_duration > 0 else 0.0
+            # performance score: frequency 70% + consistency 30%
+            frequency_score = min(100.0, calls_per_second * 10.0)
+            consistency_score = max(0.0, 100.0 - ((std_interval / mean_interval) * 100.0)) if mean_interval > 0 else 0.0
+            performance_score = max(0.0, min(100.0, frequency_score * 0.7 + consistency_score * 0.3))
+            return rank, {
+                'performance_score': performance_score,
+                'calls_per_second': calls_per_second,
+                'mean_interval': mean_interval,
+                'std_interval': std_interval,
+                'max_interval': max_interval,
+                'p95_interval': p95_interval,
+                'total_calls': total_calls,
+                'total_duration': total_duration,
+            }
+        
+        max_workers = 8
+        if self.verbose:
+            self.logger.info(f"Running multithreaded slow analysis with {max_workers} workers (per-rank, last save_count group)...")
+        
+        rank_metrics = {}
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(compute_rank_metrics, rank, entries) for rank, entries in last_group_entries.items()]
+            for fut in as_completed(futures):
+                rank, metrics = fut.result()
+                if metrics is not None:
+                    rank_metrics[rank] = metrics
+        
+        if not rank_metrics:
+            self.logger.info("  • No rank metrics computed")
+            return {}, []
+        
+        # Robust, threshold-based anomaly detection
+        ranks = sorted(rank_metrics.keys())
+        scores_arr = np.array([rank_metrics[r]['performance_score'] for r in ranks], dtype=float)
+        cps_arr = np.array([rank_metrics[r]['calls_per_second'] for r in ranks], dtype=float)
+        cv_list = []
+        for r in ranks:
+            mi = rank_metrics[r]['mean_interval']
+            si = rank_metrics[r]['std_interval']
+            cv_list.append((si / mi) if mi > 0 else 0.0)
+        cv_arr = np.array(cv_list, dtype=float)
+        
+        def median_mad(arr: np.ndarray):
+            m = float(np.median(arr)) if arr.size else 0.0
+            mad = float(np.median(np.abs(arr - m))) if arr.size else 0.0
+            return m, mad
+        
+        m_s, mad_s = median_mad(scores_arr)
+        m_c, mad_c = median_mad(cps_arr)
+        m_v, mad_v = median_mad(cv_arr)
+        p10_s = float(np.percentile(scores_arr, 10)) if scores_arr.size else 0.0
+        p10_c = float(np.percentile(cps_arr, 10)) if cps_arr.size else 0.0
+        p90_v = float(np.percentile(cv_arr, 90)) if cv_arr.size else 0.0
+        
+        use_percentile_only = (len(ranks) < 5)
+        slow_ranks = []
+        for idx, r in enumerate(ranks):
+            s = scores_arr[idx]
+            f = cps_arr[idx]
+            v = cv_arr[idx]
+            if use_percentile_only:
+                cond_score = (s < p10_s)
+                cond_cps = (f < p10_c)
+                cond_cv = (v > p90_v)
+            else:
+                cond_score = (s < (m_s - max(3.0 * mad_s, 5.0))) or (s < p10_s)
+                cond_cps = (f < (m_c - max(3.0 * mad_c, 0.1 * m_c))) or (f < p10_c)
+                cond_cv = (v > (m_v + max(3.0 * mad_v, 0.2))) or (v > p90_v)
+            hits = (1 if cond_score else 0) + (1 if cond_cps else 0) + (1 if cond_cv else 0)
+            if hits >= 2:
+                slow_ranks.append(r)
+        
+        self.logger.info("\nSIMPLE SLOW RANK ANALYSIS (multithreaded):")
+        self.logger.info(f"  • Total Ranks Analyzed: {len(rank_metrics)}")
+        if slow_ranks:
+            self.logger.info(f"  • Slow Ranks Detected: {sorted(slow_ranks)}")
+            for r in sorted(slow_ranks):
+                rm = rank_metrics[r]
+                cv_val = (cv_arr[ranks.index(r)])
+                metadata = self._get_rank_metadata(last_group_entries, r)
+                self.logger.info(f"    Rank {r} (node_ip={metadata['node_ip']}, hostname={metadata['hostname']}, gpu_pci={metadata['gpu_pci']}):")
+                self.logger.info(f"      • Score: {rm['performance_score']:.3f}")
+                self.logger.info(f"      • Calls/sec: {rm['calls_per_second']:.2f} (total_calls={rm['total_calls']}, duration={rm['total_duration']:.2f}s)")
+                self.logger.info(f"      • Interval mean/std/p95/max: {rm['mean_interval']:.4f}s / {rm['std_interval']:.4f}s / {rm['p95_interval']:.4f}s / {rm['max_interval']:.4f}s")
+                self.logger.info(f"      • CV: {cv_val:.3f}")
+        else:
+            self.logger.info("  • No obvious anomalies.")
+        
+        return rank_metrics, slow_ranks
+    
+    def _analyze_parallel_slow(self, rank_entries: Dict[int, List[LogEntry]], config_path: str) -> Optional[Dict]:
+        """Analyze parallel slow nodes using config file."""
+        
+        try:
+            cfg = yaml.safe_load(open(config_path, 'r', encoding='utf-8'))
+            tp = cfg.get('TP', 2)
+            pp = cfg.get('PP', 2)
+            ws = cfg.get('world_size', 8)
+            
+            if tp * pp > ws:
+                self.logger.warning("Invalid config (TP*PP > world_size); skip parallel slow analysis")
+                return None
+            
+            parallel = self.analyze_parallel_slow_nodes(rank_entries, tp, pp, ws)
+            
+            if 'error' in parallel:
+                self.logger.error(f"Parallel slow analysis error: {parallel['error']}")
+                return None
+            
+            self.logger.info("\nPARALLEL SLOW NODE ANALYSIS:")
+            self.logger.info(f"  • Configuration: TP={tp}, PP={pp}, DP={ws // (tp*pp)}")
+            self.logger.info(f"  • Groups Analyzed: {parallel['total_groups_analyzed']}")
+            if 'total_slow_picks' in parallel:
+                self.logger.info(f"  • Slow Picks: {parallel['total_slow_picks']}")
+            
+            # Log detailed per-rank table
+            normalized = parallel.get('normalized_scores', {}) or {}
+            raw = parallel.get('raw_scores', {}) or {}
+            durations = parallel.get('slow_durations', {}) or {}
+            parts = parallel.get('participations', {}) or {}
+            rank_list = sorted(rank_entries.keys())
+            
+            self.logger.info("  • Normalized Slow Counts / Rate (relative to min per type; rate = raw/participations):")
+            self.logger.info(f"    {'Rank':<6} {'node_ip':<16} {'hostname':<16} {'gpu_pci':<16} {'GLOBAL':<16} {'TP':<16} {'PP':<16} {'DP':<16} {'Total':<10}")
+            self.logger.info("    " + "-" * 148)
+            
+            def pct(raw_val, part_val):
+                return 0.0 if part_val == 0 else (100.0 * float(raw_val) / float(part_val))
+            
+            for r in rank_list:
+                metadata = self._get_rank_metadata(rank_entries, r)
+                sc = normalized.get(r, {'GLOBAL':0,'TP':0,'PP':0,'DP':0})
+                pr = parts.get(r, {'GLOBAL':0,'TP':0,'PP':0,'DP':0})
+                rc = raw.get(r, {'GLOBAL':0,'TP':0,'PP':0,'DP':0})
+                total = sc.get('GLOBAL', 0) + sc.get('TP', 0) + sc.get('PP', 0) + sc.get('DP', 0)
+                gl_fmt = f"{sc.get('GLOBAL',0)}/{pct(rc.get('GLOBAL',0), pr.get('GLOBAL',0)):.1f}%"
+                tp_fmt = f"{sc.get('TP',0)}/{pct(rc.get('TP',0), pr.get('TP',0)):.1f}%"
+                pp_fmt = f"{sc.get('PP',0)}/{pct(rc.get('PP',0), pr.get('PP',0)):.1f}%"
+                dp_fmt = f"{sc.get('DP',0)}/{pct(rc.get('DP',0), pr.get('DP',0)):.1f}%"
+                self.logger.info(f"    {r:<6} {metadata['node_ip']:<16} {metadata['hostname']:<16} {metadata['gpu_pci']:<16} {gl_fmt:<16} {tp_fmt:<16} {pp_fmt:<16} {dp_fmt:<16} {total:<10}")
+            
+            self.logger.info("  • Cumulative Slow Time (seconds):")
+            self.logger.info(f"    {'Rank':<6} {'node_ip':<16} {'hostname':<16} {'gpu_pci':<16} {'GLOBAL':<12} {'TP':<12} {'PP':<12} {'DP':<12} {'Total':<12}")
+            self.logger.info("    " + "-" * 132)
+            for r in rank_list:
+                metadata = self._get_rank_metadata(rank_entries, r)
+                dur = durations.get(r, {'GLOBAL':0.0,'TP':0.0,'PP':0.0,'DP':0.0})
+                total_d = float(dur.get('GLOBAL',0.0)) + float(dur.get('TP',0.0)) + float(dur.get('PP',0.0)) + float(dur.get('DP',0.0))
+                self.logger.info(f"    {r:<6} {metadata['node_ip']:<16} {metadata['hostname']:<16} {metadata['gpu_pci']:<16} {dur.get('GLOBAL',0.0):<12.6f} {dur.get('TP',0.0):<12.6f} {dur.get('PP',0.0):<12.6f} {dur.get('DP',0.0):<12.6f} {total_d:<12.6f}")
+            
+            return parallel
+            
+        except Exception as e:
+            self.logger.error(f"Error in parallel slow analysis: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            return None
+    
+    def _analyze_grouphash_slow(self, rank_entries: Dict[int, List[LogEntry]]) -> Optional[Dict]:
+        """Analyze GroupHash-based slow detection."""
+        try:
+            # GroupHashSlowDetector is already imported at the top of the file
+            
+            self.logger.info("\n" + "=" * 80)
+            self.logger.info("GROUP HASH BASED SLOW DETECTION ANALYSIS")
+            self.logger.info("=" * 80)
+            
+            grouphash_detector = GroupHashSlowDetector(
+                verbose=self.verbose,
+                use_multiprocessing=True,
+                rank_entries=rank_entries
+            )
+            
+            if self.verbose:
+                self.logger.info("Running GroupHash-based slow detection analysis...")
+            
+            operations_by_group = grouphash_detector.parse_all_logs(rank_entries)
+            
+            if not operations_by_group:
+                self.logger.info("  • No operations with groupHash found in logs")
+                return None
+            
+            group_performance = grouphash_detector.analyze_group_performance()
+            
+            if not group_performance:
+                self.logger.info("  • GroupHash performance analysis failed")
+                return None
+            
+            # Collect summary information
+            total_groups = len(group_performance)
+            total_slow_picks = sum(1 for gp in group_performance.values() if gp.is_outlier)
+            total_operations = sum(len(ops) for ops in operations_by_group.values())
+            total_ranks = len(set().union(*[gp.ranks for gp in group_performance.values()]))
+            
+            # Generate slow rank matrix
+            matrix_data = grouphash_detector.generate_slow_rank_matrix()
+            grouphash_results = {
+                'total_groups': total_groups,
+                'total_slow_picks': total_slow_picks,
+                'total_operations': total_operations,
+                'total_ranks': total_ranks,
+                'matrix_data': matrix_data,
+                'group_performance': {gh: {
+                    'group_id': gp.group_id,
+                    'op_count': gp.op_count,
+                    'ranks': gp.ranks,
+                    'slowest_rank': gp.slowest_rank,
+                    'slowest_time': gp.slowest_time,
+                    'is_outlier': gp.is_outlier
+                } for gh, gp in group_performance.items()}
+            }
+            
+            if matrix_data:
+                self.logger.info("  • GroupHash Slow Rank Matrix (Rank vs Group, Normalized; non-participants shown as '-'):")
+                all_groups = sorted(grouphash_detector.group_mapping.values())
+                header = f"    {'Rank':<6} {'node_ip':<16} {'hostname':<16} {'gpu_pci':<16}"
+                for group_id in all_groups:
+                    header += f"{'G'+str(group_id):<6}"
+                header += f"{'Total':<8}"
+                self.logger.info(header)
+                self.logger.info("    " + "-" * (6 + 16 * 3 + 6 * len(all_groups) + 8))
+                
+                for row in matrix_data:
+                    rank = row[0]
+                    values = row[1:]
+                    total_slow = sum(v for v in values if isinstance(v, int))
+                    metadata = self._get_rank_metadata(rank_entries, rank)
+                    row_str = f"    {rank:<6} {metadata['node_ip']:<16} {metadata['hostname']:<16} {metadata['gpu_pci']:<16}"
+                    for v in values:
+                        cell = ('-' if v is None else str(v))
+                        row_str += f"{cell:<6}"
+                    row_str += f"{total_slow:<8}"
+                    self.logger.info(row_str)
+                
+                self.logger.info("    Note: Per-group min computed over participants only; '-' means non-participant")
+            
+            # Verbose output (before summary)
+            if self.verbose:
+                self.logger.info("\n" + "-" * 80)
+                self.logger.info("DETAILED GROUP HASH ANALYSIS:")
+                self.logger.info("-" * 80)
+                grouphash_detector.print_parallel_style_summary()
+            
+            # Output separator and summary (always at the end)
+            self.logger.info("=" * 80)
+            self.logger.info("GROUP HASH SUMMARY:")
+            self.logger.info(f"  • Groups Analyzed: {total_groups}")
+            self.logger.info(f"  • Total Operations: {total_operations}")
+            self.logger.info(f"  • Total Ranks: {total_ranks}")
+            self.logger.info(f"  • Slow Picks: {total_slow_picks}")
+            
+            # Print top slow ranks
+            rank_slow_totals = {}
+            for rank, group_counts in grouphash_detector.rank_slow_counts.items():
+                rank_slow_totals[rank] = sum(group_counts.values())
+            
+            if rank_slow_totals:
+                sorted_slow_ranks = sorted(rank_slow_totals.items(), key=lambda x: x[1], reverse=True)
+                top_slow_ranks = [r for r, count in sorted_slow_ranks if count > 0][:3]
+                
+                if top_slow_ranks:
+                    self.logger.info(f"  • Top Slow Ranks:")
+                    for rank in top_slow_ranks:
+                        metadata = self._get_rank_metadata(rank_entries, rank)
+                        self.logger.info(f"    Rank {rank}: Hostname={metadata['hostname']}, IP={metadata['node_ip']}, PCI={metadata['gpu_pci']}")
+            
+            self.logger.info("=" * 80)
+            return grouphash_results
+            
+        except Exception as e:
+            self.logger.error(f"  • GroupHash analysis failed: {e}")
+            if self.verbose:
+                import traceback
+                traceback.print_exc()
+            return None
+
+
+def load_rank_entries(analyzer: DistributedLogAnalyzer, log_path: Optional[str], verbose: bool,max_save_count_groups: int = 2):
+    # if not analyzer.log_path:
+    #     print("No log path specified!")
+    #     return {}
+    reader = LogReader(
+        log_path=str(log_path),
+        max_save_count_groups=max_save_count_groups,
+        logger=analyzer.logger,
+    )
+    log_files = reader.discover_log_files()
+    if not log_files:
+        print("No log files found or parsing failed!")
+        return {}
+    if verbose:
+        print(f"[DEBUG] Discovered {len(log_files)} log files under {log_path}")
+    rank_entries = reader.parse_log_files()
+    if verbose:
+        total_lines = sum(len(entries) for entries in rank_entries.values())
+        print(f"[DEBUG] Parsed {len(rank_entries)} ranks, total {total_lines} lines")
+    return rank_entries
 
 
 def main():
@@ -1260,9 +1656,13 @@ def main():
     
     args = parser.parse_args()
     
-    # Create analyzer and run
+    # Load logs with LogReader, then analyze
+    reader = LogReader(log_path=args.log_path)
+    reader.discover_log_files()
+    rank_entries = reader.parse_log_files()
+    
     analyzer = DistributedLogAnalyzer(args.log_path, args.verbose)
-    analyzer.run()
+    analyzer.run_hang(rank_entries)
 
 
 if __name__ == '__main__':

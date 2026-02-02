@@ -64,16 +64,13 @@ class LogReader:
         )
         self.log_files: List[Path] = []
         self.logger = logger or logging.getLogger(__name__)
-        # New format: [node_ip] [hostname xxx] [save_count N] ... (or [node_ip] [xxx] for legacy 2-field)
-        self.log_pattern_new = re.compile(
-            r"\[([^\]]+)\] \[(?:hostname )?([^\]]+)\] \[save_count (\d+)\] \[([\d.]+)\] \[Rank (\d+)\] \[PCI ([^\]]+)\] "
-            r"\[Fun (\w+)\] \[Data (\d+)\] \[stream (0x[0-9a-fA-F]+|\(nil\))\] \[opCount (\d+)\] "
-            r"(?:\[groupHash (0x[0-9a-fA-F]+)\])?"
-        )
-        # Legacy 4-field format: [job_id] [round] [node_ip] [hostname] [save_count N] ...
+        # Single flexible pattern: optional prefix [..][..]..., then last two brackets before save_count = node_ip, hostname.
+        # Convention: any extra env vars (train_job_id, running_round, etc.) go before node_ip/hostname; only node_ip and hostname are required immediately before [save_count N].
         self.log_pattern = re.compile(
-            r"\[([^\]]+)\] \[([^\]]+)\] \[([^\]]+)\] \[([^\]]+)\] \[save_count (\d+)\] \[([\d.]+)\] \[Rank (\d+)\] \[PCI ([^\]]+)\] "
-            r"\[Fun (\w+)\] \[Data (\d+)\] \[stream (0x[0-9a-fA-F]+|\(nil\))\] \[opCount (\d+)\] "
+            r"(?:\[[^\]]+\]\s*)*"
+            r"\[([^\]]+)\] \[([^\]]+)\] \[save_count (\d+)\] "
+            r"\[([\d.]+)\] \[Rank (\d+)\] \[PCI ([^\]]+)\] "
+            r"\[Fun[c]? (\w+)\] \[Data (\d+)\] \[stream (0x[0-9a-fA-F]+|\(nil\))\] \[opCount (\d+)\] "
             r"(?:\[groupHash (0x[0-9a-fA-F]+)\])?"
         )
 
@@ -156,35 +153,21 @@ class LogReader:
         return lines
 
     def parse_log_line(self, line: str) -> Optional[LogEntry]:
-        """Parse a single log line. Supports [node_ip] [hostname xxx] (new) and legacy 4-field prefix."""
-        match = self.log_pattern_new.match(line)
-        if match:
-            node_ip = match.group(1)
-            hostname = match.group(2).strip()  # "hostname value" or "value" -> group2 is value after optional "hostname "
-            save_count = int(match.group(3))
-            timestamp = float(match.group(4))
-            rank = int(match.group(5))
-            gpu_pci = match.group(6)
-            function = match.group(7)
-            data_size = int(match.group(8))
-            stream = match.group(9)
-            op_count = int(match.group(10))
-            group_hash = match.group(11)
-        else:
-            match = self.log_pattern.match(line)
-            if not match:
-                return None
-            node_ip = match.group(3)
-            hostname = match.group(4)
-            save_count = int(match.group(5))
-            timestamp = float(match.group(6))
-            rank = int(match.group(7))
-            gpu_pci = match.group(8)
-            function = match.group(9)
-            data_size = int(match.group(10))
-            stream = match.group(11)
-            op_count = int(match.group(12))
-            group_hash = match.group(13)
+        """Parse a single log line. Prefix: optional [..] segments, then node_ip and hostname as last two before [save_count N]; body fixed."""
+        match = self.log_pattern.match(line)
+        if not match:
+            return None
+        node_ip = match.group(1).strip()
+        hostname = match.group(2).strip()
+        save_count = int(match.group(3))
+        timestamp = float(match.group(4))
+        rank = int(match.group(5))
+        gpu_pci = match.group(6)
+        function = match.group(7)
+        data_size = int(match.group(8))
+        stream = match.group(9)
+        op_count = int(match.group(10))
+        group_hash = match.group(11)
         if stream == "(nil)":
             stream = "0"
         return LogEntry(
@@ -203,19 +186,13 @@ class LogReader:
         )
 
     def _extract_save_count(self, line: str) -> Optional[int]:
-        match = self.log_pattern_new.match(line)
-        if match:
-            try:
-                return int(match.group(3))
-            except (TypeError, ValueError):
-                return None
         match = self.log_pattern.match(line)
-        if match:
-            try:
-                return int(match.group(5))
-            except (TypeError, ValueError):
-                return None
-        return None
+        if not match:
+            return None
+        try:
+            return int(match.group(3))
+        except (TypeError, ValueError):
+            return None
 
     def _read_recent_savecount_lines(
         self, file_path: Path, max_groups: int

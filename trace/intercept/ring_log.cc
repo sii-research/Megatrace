@@ -10,6 +10,7 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -182,9 +183,7 @@ void *log_writer_thread(void *arg) {
     }
 
     const char* train_job_id = getenv("TRAIN_JOB_ID");
-    if (train_job_id == NULL) {
-        train_job_id = "unknown";
-    }
+    int use_job_id_for_storage = (train_job_id != NULL && *train_job_id != '\0');
 
     int pid = getpid();
 
@@ -200,7 +199,12 @@ void *log_writer_thread(void *arg) {
     strftime(time_buffer, sizeof(time_buffer), "%Y%m%d_%H%M%S", timeinfo);
 
     char filename[256];
-    snprintf(filename, sizeof(filename), "%s/%s_%s_%d.log", nccl_megatrace_log_path, pod_name, time_buffer, pid);
+    if (!use_job_id_for_storage && (pod_name == NULL || strcmp(pod_name, "unknown") == 0)) {
+        /* No pod/job env (e.g. no train_job_id, no POD): megatrace_时间_rank_x.log */
+        snprintf(filename, sizeof(filename), "%s/megatrace_%s_rank_%d.log", nccl_megatrace_log_path, time_buffer, rank);
+    } else {
+        snprintf(filename, sizeof(filename), "%s/%s_%s_%d.log", nccl_megatrace_log_path, pod_name, time_buffer, pid);
+    }
 
     // Open log file
     FILE *fp = fopen(filename, "w");
@@ -256,7 +260,8 @@ void *log_writer_thread(void *arg) {
             LOG_INFO("[save %d] save %d logs",save_iter,num_logs);
             int n_logs = ring_buffer_pop_batch(&ring_nccl_log, logs, num_logs);
             for (int i = 0; i < n_logs; i++) {
-                fprintf(fp, "[%s] [%s] [%s] [%s] [save_count %d] %s\n", train_job_id, running_round.c_str(), node_ip, hostname, save_iter, logs[i].msg);
+                /* Log line: no pod-specific fields (analysis does not need them); storage uses job_id/round in path/filename only */
+                fprintf(fp, "[%s] [%s] [save_count %d] %s\n", node_ip, hostname, save_iter, logs[i].msg);
             }
             fflush(fp);
         }

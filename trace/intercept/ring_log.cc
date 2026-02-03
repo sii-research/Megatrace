@@ -25,6 +25,8 @@
 
 
 const int nccl_megatrace_enable = getenv("NCCL_MEGATRACE_ENABLE") ? atoi(getenv("NCCL_MEGATRACE_ENABLE")) : 1;
+// By default, do NOT log cudaStreamWaitEvent unless explicitly enabled.
+const int stream_wait_enable = getenv("STREAM_WAIT_ENABLE") ? atoi(getenv("STREAM_WAIT_ENABLE")) : 0;
 const char* nccl_megatrace_log_path = getenv("NCCL_MEGATRACE_ENABLE") ? getenv("NCCL_MEGATRACE_LOG_PATH") : "./logs";
 const int nccl_sensitive_time = getenv("NCCL_MEGATRACE_SENSTIME") ? atoi(getenv("NCCL_MEGATRACE_SENSTIME")) : 3000;
 

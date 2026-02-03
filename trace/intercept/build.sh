@@ -77,7 +77,7 @@ fi
 
 # Select source files based on GPU vendor
 if [ "$GPU_VENDOR" = "nvidia" ] || [ "$GPU_VENDOR" = "cuda" ]; then
-    SOURCES="nccl_intercept.cc intercept_common.cc ring_log.cc"
+    SOURCES="nccl_intercept.cc intercept_common.cc ring_log.cc stream_watchdog.cc"
 elif [ "$GPU_VENDOR" = "amd" ] || [ "$GPU_VENDOR" = "rocm" ] || [ "$GPU_VENDOR" = "hip" ]; then
     SOURCES="rccl_intercept.cc intercept_common.cc ring_log.cc"
 else

@@ -24,6 +24,9 @@
 
 extern const int nccl_megatrace_enable;
 extern const char* nccl_megatrace_log_path;
+// Control whether cudaStreamWaitEvent intercept logging is enabled.
+// 0 = disabled, 1 = enabled
+extern const int stream_wait_enable;
 
 // Log entry structure
 typedef struct {

@@ -4,6 +4,7 @@
 #include "intercept.h"
 #include "ring_log.h"
 #include "log.h"
+#include "stream_watchdog.h"
 #include <pthread.h>
 #include <time.h>
 #include <cstring>
@@ -112,6 +113,50 @@ FuncPtrType resolve_symbol(const char* symbol_name) {
         nullptr
     };
     return resolve_symbol_common<FuncPtrType>(symbol_name, torch_libs);
+}
+
+// Helper function to resolve CUDA runtime symbols (e.g., libcudart)
+template<typename FuncPtrType>
+FuncPtrType resolve_cuda_symbol(const char* symbol_name) {
+    const char* cuda_libs[] = {
+        // CUDA runtime (most common)
+        "libcudart.so",
+        "libcudart.so.12",
+        "libcudart.so.12.0",
+        "libcudart.so.11.0",
+        // Driver (less likely to contain cudart APIs but safe to probe)
+        "libcuda.so.1",
+        "libcuda.so",
+        nullptr
+    };
+    return resolve_symbol_common<FuncPtrType>(symbol_name, cuda_libs);
+}
+
+// Intercept CUDA cudaStreamWaitEvent to feed stream watchdog (no direct log_event)
+extern "C" cudaError_t cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event, unsigned int flags) {
+    if (!real_cudaStreamWaitEvent) {
+        std::lock_guard<std::mutex> lock(dlsym_mutex);
+        if (!real_cudaStreamWaitEvent) {
+            real_cudaStreamWaitEvent = resolve_cuda_symbol<cudaStreamWaitEvent_t>("cudaStreamWaitEvent");
+            if (!real_cudaStreamWaitEvent) {
+                const char* err = dlerror();
+                LOG_ERROR("Cannot find symbol cudaStreamWaitEvent: %s", err ? err : "unknown error");
+                return cudaErrorUnknown;
+            }
+        }
+    }
+
+    if (nccl_megatrace_enable == MEGATRACE_LOG_ENABLE && stream_wait_enable == 1) {
+        long long start_us = 0;
+        {
+            auto now = std::chrono::system_clock::now();
+            auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch());
+            start_us = now_us.count();
+        }
+        enqueue_stream_event(event, stream, start_us);
+    }
+
+    return real_cudaStreamWaitEvent(stream, event, flags);
 }
 
 // Intercept ncclGetUniqueId to capture commId

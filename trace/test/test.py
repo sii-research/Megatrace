@@ -53,20 +53,26 @@ def main():
     allgather_tensor = torch.tensor([dist.get_rank() + 1.0], device=device)
     print(f"rank {dist.get_rank()} allgather_tensor before allgather: {allgather_tensor.item()}")
 
-    dist.all_gather(allgather_tensor, local_tensor)
+    allgather_tensor_list = [torch.zeros_like(local_tensor) for _ in range(dist.get_world_size())]
+    dist.all_gather(allgather_tensor_list, local_tensor)
+    allgather_tensor = allgather_tensor_list[dist.get_rank()]
     print(f"rank {dist.get_rank()} allgather_tensor after allgather: {allgather_tensor.item()}")
 
-    dist.all_gather(allgather_tensor, local_tensor)
+    allgather_tensor_list = [torch.zeros_like(local_tensor) for _ in range(dist.get_world_size())]
+    dist.all_gather(allgather_tensor_list, local_tensor)
+    allgather_tensor = allgather_tensor_list[dist.get_rank()]
     print(f"rank {dist.get_rank()} allgather_tensor after allgather: {allgather_tensor.item()}")
 
     #reducescatter
     reducescatter_tensor = torch.tensor([dist.get_rank() + 1.0], device=device)
     print(f"rank {dist.get_rank()} reducescatter_tensor before reducescatter: {reducescatter_tensor.item()}")
 
-    dist.reduce_scatter(reducescatter_tensor, local_tensor)
+    scatter_input_list = [torch.tensor([dist.get_rank() + 1.0], device=device) for _ in range(dist.get_world_size())]
+    dist.reduce_scatter(reducescatter_tensor, scatter_input_list, op=dist.ReduceOp.SUM)
     print(f"rank {dist.get_rank()} reducescatter_tensor after reducescatter: {reducescatter_tensor.item()}")
 
-    dist.reduce_scatter(reducescatter_tensor, local_tensor)
+    scatter_input_list = [torch.tensor([dist.get_rank() + 1.0], device=device) for _ in range(dist.get_world_size())]
+    dist.reduce_scatter(reducescatter_tensor, scatter_input_list, op=dist.ReduceOp.SUM)
     print(f"rank {dist.get_rank()} reducescatter_tensor after reducescatter: {reducescatter_tensor.item()}")
 
     #broadcast
@@ -83,13 +89,25 @@ def main():
     sendrecv_tensor = torch.tensor([dist.get_rank() + 1.0], device=device)
     print(f"rank {dist.get_rank()} sendrecv_tensor before sendrecv: {sendrecv_tensor.item()}")
 
-    dist.sendrecv(sendrecv_tensor, src=0)
+    dist.broadcast(sendrecv_tensor, src=0)
     print(f"rank {dist.get_rank()} sendrecv_tensor after sendrecv: {sendrecv_tensor.item()}")
 
-    dist.sendrecv(sendrecv_tensor, src=0)
+    dist.broadcast(sendrecv_tensor, src=0)
     print(f"rank {dist.get_rank()} sendrecv_tensor after sendrecv: {sendrecv_tensor.item()}")
 
+    #send
+    send_tensor = torch.tensor([dist.get_rank() + 200.0], device=device)
+    if dist.get_rank() == 0:
+        print(f"rank 0 send_tensor before send: {send_tensor.item()}")
+        dist.send(tensor=send_tensor, dst=1)
+        print(f"rank 0 sent to rank 1")
 
+    #recv
+    recv_tensor = torch.tensor([0.0], device=device)
+    if dist.get_rank() == 1:
+        print(f"rank 1 recv_tensor before recv: {recv_tensor.item()}")
+        dist.recv(tensor=recv_tensor, src=0)
+        print(f"rank 1 recv_tensor after recv: {recv_tensor.item()}")
 
     time.sleep(2)
     dist.destroy_process_group()

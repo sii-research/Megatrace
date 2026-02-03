@@ -10,12 +10,17 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <cstring>
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <chrono>
+#include <vector>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 
 
@@ -158,6 +163,29 @@ static void get_pci_bus_id(char* pci_buf, size_t buf_size) {
     megatrace_get_pci_bus_id(pci_buf, buf_size);
 }
 
+/* Get primary non-loopback IPv4 address (for Docker / bare metal when MY_POD_IP is not set). Returns 0 on success, -1 on failure. */
+static int get_primary_ip_fallback(char* buf, size_t buf_size) {
+    struct ifaddrs* ifap = NULL;
+    if (getifaddrs(&ifap) != 0 || ifap == NULL)
+        return -1;
+    int ret = -1;
+    for (struct ifaddrs* ifa = ifap; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL)
+            continue;
+        if (ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        struct sockaddr_in* sa = (struct sockaddr_in*)ifa->ifa_addr;
+        if (sa->sin_addr.s_addr == htonl(INADDR_LOOPBACK))  /* 127.0.0.1 */
+            continue;
+        if (inet_ntop(AF_INET, &sa->sin_addr, buf, buf_size) != NULL) {
+            ret = 0;
+            break;
+        }
+    }
+    freeifaddrs(ifap);
+    return ret;
+}
+
  /*
  * Log writer thread: moves buffered entries to disk.
  * Flush policy: write logs when there is data and time since last write
@@ -170,9 +198,14 @@ void *log_writer_thread(void *arg) {
     }
     std::string running_round = get_running_round(pod_name);
 
-    const char *node_ip = getenv("MY_POD_IP");
-    if (node_ip == NULL) {
-        node_ip = "unknown";
+    /* Prefer MY_POD_IP (K8s); fallback to primary non-loopback IPv4 for Docker / bare metal */
+    char node_ip_buf[64];
+    const char* node_ip = getenv("MY_POD_IP");
+    if (node_ip == NULL || *node_ip == '\0') {
+        if (get_primary_ip_fallback(node_ip_buf, sizeof(node_ip_buf)) == 0)
+            node_ip = node_ip_buf;
+        else
+            node_ip = "unknown";
     }
 
     // Fetch hostname
@@ -182,8 +215,25 @@ void *log_writer_thread(void *arg) {
     }
 
     const char* train_job_id = getenv("TRAIN_JOB_ID");
-    if (train_job_id == NULL) {
-        train_job_id = "unknown";
+    int use_job_id_for_storage = (train_job_id != NULL && *train_job_id != '\0');
+
+    /* Parse MEGATRACE_LOG_EXTRA_FIELDS: comma-separated names. Each name is either a built-in computed field (e.g. RUNNING_ROUND) or an env var name; values are printed as [value] before node_ip/hostname. Convention: node_ip and hostname are last two before save_count. */
+    std::vector<std::string> extra_field_names;
+    const char* extra_env = getenv("MEGATRACE_LOG_EXTRA_FIELDS");
+    if (extra_env && *extra_env) {
+        std::string s(extra_env);
+        size_t pos = 0;
+        while (pos < s.size()) {
+            size_t next = s.find(',', pos);
+            if (next == std::string::npos) next = s.size();
+            std::string name = s.substr(pos, next - pos);
+            while (!name.empty() && (name.back() == ' ' || name.back() == '\t')) name.pop_back();
+            size_t start = 0;
+            while (start < name.size() && (name[start] == ' ' || name[start] == '\t')) start++;
+            if (start > 0) name = name.substr(start);
+            if (!name.empty()) extra_field_names.push_back(name);
+            pos = next + 1;
+        }
     }
 
     int pid = getpid();
@@ -200,7 +250,12 @@ void *log_writer_thread(void *arg) {
     strftime(time_buffer, sizeof(time_buffer), "%Y%m%d_%H%M%S", timeinfo);
 
     char filename[256];
-    snprintf(filename, sizeof(filename), "%s/%s_%s_%d.log", nccl_megatrace_log_path, pod_name, time_buffer, pid);
+    if (!use_job_id_for_storage && (pod_name == NULL || strcmp(pod_name, "unknown") == 0)) {
+        /* No pod/job env (e.g. no train_job_id, no POD): megatrace_时间_rank_x.log */
+        snprintf(filename, sizeof(filename), "%s/megatrace_%s_rank_%d.log", nccl_megatrace_log_path, time_buffer, rank);
+    } else {
+        snprintf(filename, sizeof(filename), "%s/%s_%s_%d.log", nccl_megatrace_log_path, pod_name, time_buffer, pid);
+    }
 
     // Open log file
     FILE *fp = fopen(filename, "w");
@@ -256,7 +311,18 @@ void *log_writer_thread(void *arg) {
             LOG_INFO("[save %d] save %d logs",save_iter,num_logs);
             int n_logs = ring_buffer_pop_batch(&ring_nccl_log, logs, num_logs);
             for (int i = 0; i < n_logs; i++) {
-                fprintf(fp, "[%s] [%s] [%s] [%s] [save_count %d] %s\n", train_job_id, running_round.c_str(), node_ip, hostname, save_iter, logs[i].msg);
+                /* Optional extra prefix: from MEGATRACE_LOG_EXTRA_FIELDS; each name is either a built-in computed field or an env var name */
+                for (const auto& name : extra_field_names) {
+                    const char* val = NULL;
+                    if (name == "RUNNING_ROUND") {
+                        val = running_round.c_str();
+                    } else {
+                        val = getenv(name.c_str());
+                    }
+                    if (val && *val != '\0')
+                        fprintf(fp, "[%s] ", val);
+                }
+                fprintf(fp, "[%s] [%s] [save_count %d] %s\n", node_ip, hostname, save_iter, logs[i].msg);
             }
             fflush(fp);
         }

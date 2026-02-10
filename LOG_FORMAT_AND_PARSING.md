@@ -36,11 +36,59 @@
 
 - **格式**：逗号分隔的**字段名**，例如：`TRAIN_JOB_ID,RUNNING_ROUND`。
 - **取值规则**：
-  - **环境变量**：名字在列表中且非“内置计算字段”时，使用 `getenv(名字)`；未设置或空则不输出该段。
-  - **内置计算字段**：当前支持 `RUNNING_ROUND`，由 `get_running_round(POD)` 计算（POD 名最后一段，如 `worker-0-8` → `8`），不读环境变量 `RUNNING_ROUND`。
+  - **环境变量**：名字未注册为内置计算字段时，使用 `getenv(名字)`；未设置或空则不输出该段。
+  - **内置计算字段**：当前支持 `RUNNING_ROUND`，由 resolver 根据 POD 名计算（POD 名最后一段，如 `worker-0-8` → `8`），不读环境变量 `RUNNING_ROUND`。
 - **输出顺序**：与配置顺序一致，全部在 `[node_ip] [hostname]` 之前。
 
-扩展新的“计算字段”时，在 ring_log 写行逻辑里按名字分支，写入对应计算值即可。
+### 1.3.1 扩展内置计算字段（解耦设计）
+
+计算逻辑已从写行循环中解耦，采用**注册表**方式。新增内置字段时无需修改 `ring_log.cc` 的循环。
+
+- **实现位置**：`trace/intercept/extra_field_resolver.h`、`extra_field_resolver.cc`
+- **扩展步骤（新增一个内置计算字段，如 `MY_ROUND`）**：
+  1. 在 `extra_field_resolver.cc` 中实现 resolver 函数，例如：`std::string resolve_my_round(const ExtraFieldContext& ctx)`，从 `ctx.pod_name`、`ctx.save_iter` 等上下文计算字符串。
+  2. 在 `init_builtin_extra_resolvers()` 中注册：`register_extra_field_resolver("MY_ROUND", resolve_my_round)`。
+  3. 重新编译拦截 .so，并在运行环境中配置 `MEGATRACE_LOG_EXTRA_FIELDS=...,MY_ROUND,...`。
+
+- **外部系统集成**：若将 Megatrace 作为库或子模块使用，可在自己的 .cc 中：
+  1. `#include "extra_field_resolver.h"`
+  2. 在 `log_writer_thread` 启动前调用 `megatrace::init_builtin_extra_resolvers()`（若尚未初始化）。
+  3. 调用 `megatrace::register_extra_field_resolver("FIELD", resolver)` 注册自定义字段。
+
+### 1.3.2 配置新字段的完整步骤（内置计算 & 非内置）
+
+下面给出从零开始“加一个新字段”的完整流程，区分**非内置（环境变量）**与**内置计算字段**两种情况。
+
+1. **确定字段名与含义**
+   - 约定一个不会与现有字段冲突的名字，例如：`TRAIN_JOB_ID`、`CLUSTER_ID`、`MY_ROUND`。
+   - 字段值最终会以 `[value]` 形式出现在日志前缀中。
+
+2. **非内置计算字段（仅环境变量）的配置步骤**
+   1. 在启动脚本 / Pod 配置中设置对应环境变量，例如：
+      - `export CLUSTER_ID=cluster-a`
+   2. 在同一处配置 `MEGATRACE_LOG_EXTRA_FIELDS`，将新字段名加入逗号列表，例如：
+      - `export MEGATRACE_LOG_EXTRA_FIELDS=TRAIN_JOB_ID,CLUSTER_ID`
+   3. 确认日志中前缀形如：
+      - `[job-xxx] [cluster-a] [node_ip] [hostname] [save_count N] ...`
+   4. 若某个环境变量未设置或为空，该字段对应的 `[..]` 不会输出。
+
+3. **内置计算字段（需要代码逻辑）的配置步骤**
+   1. 在 `extra_field_resolver.cc` 中新增 resolver 函数，例如：
+      - `std::string resolve_my_round(const ExtraFieldContext& ctx) { /* 基于 ctx.pod_name / ctx.save_iter 等计算 */ }`
+   2. 在同文件的 `init_builtin_extra_resolvers()` 中注册：
+      - `register_extra_field_resolver("MY_ROUND", resolve_my_round);`
+   3. 重新编译生成拦截 .so（`nccl_intercept.so` / `rccl_intercept.so`）。
+   4. 在运行环境中设置：
+      - `export MEGATRACE_LOG_EXTRA_FIELDS=TRAIN_JOB_ID,MY_ROUND,RUNNING_ROUND`
+   5. 启动训练后，检查日志行前缀中已出现 `[MY_ROUND 的计算结果]`。
+
+4. **混合使用示例（环境变量 + 内置字段）**
+   - 启动环境：
+     - `export TRAIN_JOB_ID=job-xxx`
+     - `export CLUSTER_ID=cluster-a`
+     - `export MEGATRACE_LOG_EXTRA_FIELDS=TRAIN_JOB_ID,CLUSTER_ID,MY_ROUND,RUNNING_ROUND`
+   - 日志前缀示例：
+     - `[job-xxx] [cluster-a] [<MY_ROUND>] [<RUNNING_ROUND>] [node_ip] [hostname] [save_count N] ...`
 
 ### 1.4 node_ip 获取方式
 
@@ -119,6 +167,6 @@
 
 ## 四、扩展与兼容
 
-- **写端**：在 `MEGATRACE_LOG_EXTRA_FIELDS` 中增加新名字（环境变量或内置计算字段），并保证 **node_ip、hostname 仍为最后两段**，即可扩展前缀，无需改分析。
+- **写端**：在 `MEGATRACE_LOG_EXTRA_FIELDS` 中增加新名字（环境变量或内置计算字段），并保证 **node_ip、hostname 仍为最后两段**，即可扩展前缀，无需改分析。内置计算字段通过 `extra_field_resolver` 注册表扩展，与写行循环解耦。
 - **分析端**：不解析、不依赖可选前缀内容；只要“最后两段 + save_count + 消息体”格式不变，解析保持兼容。
 - **建议**：自定义前缀字段的值中避免包含 `]`，以免破坏 `[..]` 段解析；若必须包含，需在写端转义或与解析端约定新规则。

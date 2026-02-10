@@ -1,6 +1,7 @@
 #define MEGA_CC
 #include "ring_log.h"
 #include "log.h"
+#include "extra_field_resolver.h"
 #include <sys/un.h>
 #include <utime.h>
 #include <iostream>
@@ -102,19 +103,6 @@ int ring_buffer_pop_batch(ring_buffer_t *rb, log_entry_t *out_entries, int max_e
     	 return count;
 }
 
-std::string get_running_round(const std::string& pod_name) {
-    int dash_count = std::count(pod_name.begin(), pod_name.end(), '-');
-    // example pod name job-34e2a67a-d3d5-43ef-9d3a-07e9986a7355-worker-1-8
-    if (dash_count < 8) {
-        return "0";
-    }
-    size_t last_dash_pos = pod_name.find_last_of('-');
-    if (last_dash_pos == std::string::npos) {
-        return "0";
-    }
-    return pod_name.substr(last_dash_pos + 1);
-}
-
 /*
 * Rotate log files: rename existing files with version suffix and drop the oldest.
 * filename: current log file (full path)
@@ -198,7 +186,9 @@ void *log_writer_thread(void *arg) {
     if (pod_name == NULL) {
         pod_name = "unknown";
     }
-    std::string running_round = get_running_round(pod_name);
+    std::string pod_name_str(pod_name);
+
+    megatrace::init_builtin_extra_resolvers();
 
     /* Prefer MY_POD_IP (K8s); fallback to primary non-loopback IPv4 for Docker / bare metal */
     char node_ip_buf[64];
@@ -312,17 +302,12 @@ void *log_writer_thread(void *arg) {
             save_iter++;
             LOG_INFO("[save %d] save %d logs",save_iter,num_logs);
             int n_logs = ring_buffer_pop_batch(&ring_nccl_log, logs, num_logs);
+            megatrace::ExtraFieldContext ctx{pod_name_str, save_iter};
             for (int i = 0; i < n_logs; i++) {
-                /* Optional extra prefix: from MEGATRACE_LOG_EXTRA_FIELDS; each name is either a built-in computed field or an env var name */
                 for (const auto& name : extra_field_names) {
-                    const char* val = NULL;
-                    if (name == "RUNNING_ROUND") {
-                        val = running_round.c_str();
-                    } else {
-                        val = getenv(name.c_str());
-                    }
-                    if (val && *val != '\0')
-                        fprintf(fp, "[%s] ", val);
+                    std::string val = megatrace::get_extra_field_value(name, ctx);
+                    if (!val.empty())
+                        fprintf(fp, "[%s] ", val.c_str());
                 }
                 fprintf(fp, "[%s] [%s] [save_count %d] %s\n", node_ip, hostname, save_iter, logs[i].msg);
             }

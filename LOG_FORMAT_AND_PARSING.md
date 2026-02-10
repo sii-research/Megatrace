@@ -36,11 +36,24 @@
 
 - **格式**：逗号分隔的**字段名**，例如：`TRAIN_JOB_ID,RUNNING_ROUND`。
 - **取值规则**：
-  - **环境变量**：名字在列表中且非“内置计算字段”时，使用 `getenv(名字)`；未设置或空则不输出该段。
-  - **内置计算字段**：当前支持 `RUNNING_ROUND`，由 `get_running_round(POD)` 计算（POD 名最后一段，如 `worker-0-8` → `8`），不读环境变量 `RUNNING_ROUND`。
+  - **环境变量**：名字未注册为内置计算字段时，使用 `getenv(名字)`；未设置或空则不输出该段。
+  - **内置计算字段**：当前支持 `RUNNING_ROUND`，由 resolver 根据 POD 名计算（POD 名最后一段，如 `worker-0-8` → `8`），不读环境变量 `RUNNING_ROUND`。
 - **输出顺序**：与配置顺序一致，全部在 `[node_ip] [hostname]` 之前。
 
-扩展新的“计算字段”时，在 ring_log 写行逻辑里按名字分支，写入对应计算值即可。
+### 1.3.1 扩展内置计算字段（解耦设计）
+
+计算逻辑已从写行循环中解耦，采用**注册表**方式。新增内置字段时无需修改 `ring_log.cc` 的循环。
+
+- **实现位置**：`trace/intercept/extra_field_resolver.h`、`extra_field_resolver.cc`
+- **扩展步骤**：
+  1. 在 `extra_field_resolver.cc` 中实现 resolver 函数：`std::string my_resolver(const ExtraFieldContext& ctx)`
+  2. 在 `init_builtin_extra_resolvers()` 中注册：`register_extra_field_resolver("MY_FIELD", my_resolver)`
+  3. 配置 `MEGATRACE_LOG_EXTRA_FIELDS=...,MY_FIELD,...`
+
+- **外部系统集成**：若将 Megatrace 作为库或子模块使用，可在自己的 .cc 中：
+  1. `#include "extra_field_resolver.h"`
+  2. 在 `log_writer_thread` 启动前调用 `megatrace::init_builtin_extra_resolvers()`（若尚未初始化）
+  3. 调用 `megatrace::register_extra_field_resolver("FIELD", resolver)` 注册自定义字段
 
 ### 1.4 node_ip 获取方式
 
@@ -119,6 +132,6 @@
 
 ## 四、扩展与兼容
 
-- **写端**：在 `MEGATRACE_LOG_EXTRA_FIELDS` 中增加新名字（环境变量或内置计算字段），并保证 **node_ip、hostname 仍为最后两段**，即可扩展前缀，无需改分析。
+- **写端**：在 `MEGATRACE_LOG_EXTRA_FIELDS` 中增加新名字（环境变量或内置计算字段），并保证 **node_ip、hostname 仍为最后两段**，即可扩展前缀，无需改分析。内置计算字段通过 `extra_field_resolver` 注册表扩展，与写行循环解耦。
 - **分析端**：不解析、不依赖可选前缀内容；只要“最后两段 + save_count + 消息体”格式不变，解析保持兼容。
 - **建议**：自定义前缀字段的值中避免包含 `]`，以免破坏 `[..]` 段解析；若必须包含，需在写端转义或与解析端约定新规则。

@@ -1,4 +1,4 @@
-<img src="asset/sii-infrawaves.svg" alt="Logo" style="width: 100%; max-width: 100%;">
+<img src="asset/sii-infrawaves-buaa.svg" alt="Logo" style="width: 100%; max-width: 100%;">
 <br>
 <br>
 <h1 align="center">Megatrace</h1>

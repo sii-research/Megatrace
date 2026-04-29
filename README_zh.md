@@ -249,6 +249,27 @@ python gpu_interferer.py --device 0 --duration 120 --workers 4 --matrix-size 819
 python gpu_interferer.py --device 0 --duration 120 --workers 4 --matrix-size 8192 --dtype float16 --mem-gb 6 --sleep-ms 10
 ```
 
+
+## 引用
+本仓库包含以下论文中实现的基础代码:
+
+> Fangzheng Jiao, Menghao Zhang, Bolin Chen, Jiaxun Huang, Yanmin Jia, Xiaohe Hu, Bohua Xu, Bowen Han, Chunming Hu. Megatrace:Troubleshooting Hang and Slowdown in Large-scale LLM Training Clusters. In the 46th IEEE International Conference on Distributed Computing Systems (ICDCS), Seoul, South Korea, June 22–25, 2026.
+
+
+如果你想在论文中引用本研究，可以参考下面的引用格式:
+
+- BibTeX:
+
+```
+@inproceedings{Megatrace2026,
+  author    = {Fangzheng Jiao, Menghao Zhang, Bolin Chen, Jiaxun Huang, Yanmin Jia, Xiaohe Hu, Bohua Xu, Bowen Han, Chunming Hu},
+  title     = {Megatrace:Troubleshooting Hang and Slowdown in Large-scale LLM Training Clusters},
+  booktitle = {the 46th IEEE International Conference on Distributed Computing Systems (ICDCS)},
+  year      = {2026}
+}
+```
+
+
 ## 🙇‍♂️ 许可证与致谢
 
 * 详细许可条款请见 LICENSE。
